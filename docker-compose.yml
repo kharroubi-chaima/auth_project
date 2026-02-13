@@ -1,0 +1,34 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      POSTGRES_DB: authentification
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: chaima123
+    ports:
+      - "5433:5432"
+
+  web:
+    build: .
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py init_roles &&
+             python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    environment:
+      POSTGRES_DB: authentification
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: chaima123
+      PGHOST: db
+    depends_on:
+      - db
+volumes:
+  postgres_data:
