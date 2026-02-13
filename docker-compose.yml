@@ -1,34 +1,36 @@
-version: '3.9'
+version: '3.8'
 
 services:
   db:
-    image: postgres:15-alpine
-    restart: always
-    volumes:
-      - postgres_data:/var/lib/postgresql/data/
+    image: postgres:15
+    container_name: auth_postgres
     environment:
-      POSTGRES_DB: authentification
+      POSTGRES_DB: authentification   # Nom de la base de données
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: chaima123
     ports:
-      - "5433:5432"
+      - "5433:5432"  # On expose le port 5433 de l'hôte vers le 5432 du conteneur
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # Persistance des données
+    restart: unless-stopped
 
   web:
     build: .
-    command: >
-      sh -c "python manage.py migrate &&
-             python manage.py init_roles &&
-             python manage.py runserver 0.0.0.0:8000"
+    container_name: auth_django
+    command: python manage.py runserver 0.0.0.0:8000
     volumes:
-      - .:/app
+      - .:/app  # Montage du code pour le développement (rechargement automatique)
     ports:
       - "8000:8000"
     environment:
-      POSTGRES_DB: authentification
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: chaima123
-      PGHOST: db
+      DB_NAME: authentification
+      DB_USER: postgres
+      DB_PASSWORD: chaima123
+      DB_HOST: db  # nom du service, sera résolu par Docker
+      DB_PORT: 5432
     depends_on:
       - db
+    restart: unless-stopped
+
 volumes:
   postgres_data:
