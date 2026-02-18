@@ -18,6 +18,27 @@ class UserSerializer(serializers.ModelSerializer):
         user.set_password(password)  
         user.save()
         return user
+    
+# Partie ajouter pour la 2FA avec Google Authenticator
+class TOTPSetupSerializer(serializers.Serializer):
+    """Renvoie le secret et l'URI pour le QR code."""
+    secret = serializers.CharField(read_only=True)
+    uri = serializers.CharField(read_only=True)
+
+class TOTPVerifySerializer(serializers.Serializer):
+    code = serializers.CharField(max_length=6, min_length=6)
+    # On peut aussi demander le mot de passe pour sécuriser l'activation
+    password = serializers.CharField(write_only=True, required=False)
+
+    def validate_code(self, value):
+        if not value.isdigit():
+            raise serializers.ValidationError("Le code doit contenir uniquement des chiffres.")
+        return value
+
+class TOTPDisableSerializer(serializers.Serializer):
+    password = serializers.CharField(write_only=True)
+    code = serializers.CharField(max_length=6, min_length=6, required=False)
+#fin de la partie 2FA
 
 class RoleSerializer(serializers.ModelSerializer):
     class Meta:

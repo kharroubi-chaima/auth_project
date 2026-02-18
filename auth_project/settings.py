@@ -67,12 +67,14 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                #'django.core.mail.backends.console.EmailBackend',  # Pour afficher les emails dans la console pendant le développement
             ],
         },
     },
 ]
 
 WSGI_APPLICATION = 'auth_project.wsgi.application'
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
 
 # Database

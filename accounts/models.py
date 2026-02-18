@@ -38,6 +38,10 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     date_joined = models.DateTimeField(auto_now_add=True)
+    #champs pour 2FA avec Google Authenticator
+    totp_secret = models.CharField(max_length=32, blank=True, null=True)  # secret pour Google Authenticator
+    totp_enabled = models.BooleanField(default=False)
+    #fin d'implémentation 2FA
 
     objects = UserManager()
 
@@ -45,6 +49,34 @@ class User(AbstractBaseUser, PermissionsMixin):
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name']
 
+
+    #les fonctions pour générer le totp secret et vérifier le code 2FA
+    def generate_totp_secret(self):
+        """Génère un nouveau secret TOTP et le sauvegarde sans activer la 2FA."""
+        import pyotp
+        self.totp_secret = pyotp.random_base32()
+        self.save(update_fields=['totp_secret'])
+        return self.totp_secret
+
+    def get_totp_uri(self):
+        """Retourne l'URI otpauth à afficher en QR code."""
+        if not self.totp_secret:
+            return None
+        import pyotp
+        return pyotp.totp.TOTP(self.totp_secret).provisioning_uri(
+            name=self.email,
+            issuer_name="VotreApplication"
+        )
+
+    def verify_totp(self, code):
+        """Vérifie un code TOTP."""
+        if not self.totp_secret:
+            return False
+        import pyotp
+        totp = pyotp.TOTP(self.totp_secret)
+        return totp.verify(code)
+    
+    #fin d'implémentation 2FA
     def __str__(self):
         return self.email
 
