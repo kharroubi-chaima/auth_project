@@ -1,0 +1,12 @@
+*.pyc
+__pycache__
+*.log
+.local
+.env
+db.sqlite3
+.DS_Store
+.git
+.gitignore
+README.md
+docker-compose.yml
+postgres_data/
