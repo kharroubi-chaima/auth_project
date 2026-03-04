@@ -42,10 +42,25 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework_simplejwt',
+    'corsheaders',
+    'django_filters',
     'accounts',
+    'localisations', 
+    'pharmacies.apps.PharmaciesConfig', 
+    'auth_project',
+    'rest_framework_simplejwt.token_blacklist',
+    'django_crontab',
 ]
 
+CRONJOBS = [
+    # 1er de chaque mois à 00h01 → générer les gardes du mois
+    ('1 0 1 * *', 'django.core.management.call_command', ['generer_gardes']),
+    
+    # Optionnel : horaires Ramadan (si période active)
+    ('0 1 1 * *', 'django.core.management.call_command', ['generer_horaires_ramadan']),
+]
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',  # Middleware pour gérer les CORS
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -74,7 +89,16 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'auth_project.wsgi.application'
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+#EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+# Email Configuration
+EMAIL_BACKEND       = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST          = 'smtp.gmail.com'
+EMAIL_PORT          = 587
+EMAIL_USE_TLS       = True
+EMAIL_HOST_USER     = 'chaimakharoubi73@gmail.com'   
+EMAIL_HOST_PASSWORD = 'pwkt vxrj yoaj ubno'          
+DEFAULT_FROM_EMAIL  = 'chaimakharoubi73@gmail.com'
 
 
 # Database
@@ -138,17 +162,35 @@ AUTH_USER_MODEL = 'accounts.User'
 REST_FRAMEWORK = {
     #toutes les requetes utilisent JWT 
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ),
+        #'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'accounts.authentication.CustomJWTAuthentication',
+),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',   # Toutes les vues nécessitent authentification par défaut
     ),
+    'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,
 }
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:4200",
+    
+]
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:4200",
+]
+CORS_ALLOW_CREDENTIALS = True  # ← manque cette ligne !
 
 # JWT settings :: Définir la duree de vie des tokens  
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
     'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_COOKIE': 'access_token',
+    'AUTH_COOKIE_REFRESH': 'refresh_token',
+    'AUTH_COOKIE_HTTPONLY': True,
+    'AUTH_COOKIE_SAMESITE': 'Lax',
+    'AUTH_COOKIE_SECURE': False,  # dev only
 }
 
