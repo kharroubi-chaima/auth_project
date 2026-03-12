@@ -14,6 +14,12 @@ class Command(BaseCommand):
     ADMIN_PASSWORD   = 'Admin@2026!'
     ADMIN_FIRST_NAME = 'Super'
     ADMIN_LAST_NAME  = 'Admin'
+    
+    ADMIN_EMAIL      = 'Mohamed@gestionpharmacie.tn'
+    ADMIN_PASSWORD   = 'Mohamed@2026!'
+    ADMIN_FIRST_NAME = 'Mohamed'
+    ADMIN_LAST_NAME  = 'Mohamed'
+
 
     # ─── DÉFINITION DES PERMISSIONS PAR CATÉGORIE ─────────────
     PERMISSIONS = {

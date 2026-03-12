@@ -10,19 +10,27 @@ from localisations.serializers import DelegationSerializer
 
 class PharmacieCreateSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Pharmacie
-        fields = ['nom', 'adresse', 'telephone', 'email', 'categorie',  'delegation', 'latitude', 'longitude', 'est_active','proprietaire']
+        model  = Pharmacie
+        fields = [
+            'nom', 'adresse', 'telephone', 'email',
+            'categorie', 'delegation',
+            'latitude', 'longitude',
+            'est_active', 'proprietaire',
+        ]
+        extra_kwargs = {
+            # proprietaire est assigné dans perform_create, pas envoyé par le frontend
+            'proprietaire': {'required': False, 'read_only': True},
+            'email'       : {'required': False, 'allow_null': True,  'allow_blank': True},
+            'latitude'    : {'required': False, 'allow_null': True},
+            'longitude'   : {'required': False, 'allow_null': True},
+        }
 
     def validate(self, data):
-        # Vérifier doublon par coordonnées GPS
+        # ── Vérifier doublon par coordonnées GPS ──────────────
         lat = data.get('latitude')
         lng = data.get('longitude')
         if lat and lng:
-            existante = Pharmacie.objects.filter(
-                latitude=lat,
-                longitude=lng
-            )
-            # En cas de update, exclure l'instance actuelle
+            existante = Pharmacie.objects.filter(latitude=lat, longitude=lng)
             if self.instance:
                 existante = existante.exclude(pk=self.instance.pk)
             if existante.exists():
@@ -30,8 +38,8 @@ class PharmacieCreateSerializer(serializers.ModelSerializer):
                     'coordonnees': f"Une pharmacie existe déjà à ces coordonnées ({lat}, {lng})."
                 })
 
-        # Vérifier doublon par nom + adresse
-        nom = data.get('nom')
+        # ── Vérifier doublon par nom + adresse ────────────────
+        nom    = data.get('nom')
         adresse = data.get('adresse')
         if nom and adresse:
             existante = Pharmacie.objects.filter(
@@ -46,17 +54,17 @@ class PharmacieCreateSerializer(serializers.ModelSerializer):
                 })
 
         return data
-        
+
 
 class HoraireTravailSerializer(serializers.ModelSerializer):
     jour_nom = serializers.CharField(source='get_jour_display', read_only=True)
 
     class Meta:
-        model = HoraireTravail
+        model  = HoraireTravail
         fields = [
             'id', 'jour', 'jour_nom', 'est_ouvert',
             'heure_ouverture', 'heure_fermeture',
-            'pause_debut', 'pause_fin'
+            'pause_debut', 'pause_fin',
         ]
 
 
@@ -64,11 +72,11 @@ class HoraireRamadanSerializer(serializers.ModelSerializer):
     jour_nom = serializers.CharField(source='get_jour_display', read_only=True)
 
     class Meta:
-        model = HoraireRamadan
+        model  = HoraireRamadan
         fields = [
             'id', 'jour', 'jour_nom', 'est_ouvert',
             'heure_ouverture_1', 'heure_fermeture_1',
-            'heure_ouverture_2', 'heure_fermeture_2'
+            'heure_ouverture_2', 'heure_fermeture_2',
         ]
 
 
@@ -76,29 +84,28 @@ class GardeSerializer(serializers.ModelSerializer):
     type_garde_nom = serializers.CharField(source='get_type_garde_display', read_only=True)
 
     class Meta:
-        model = GardePharmacie
+        model  = GardePharmacie
         fields = [
             'id', 'type_garde', 'type_garde_nom',
             'date_debut', 'date_fin',
-            'heure_debut', 'heure_fin'
+            'heure_debut', 'heure_fin',
         ]
 
 
 class PharmacieListSerializer(serializers.ModelSerializer):
-    """Serializer léger pour la liste et la carte"""
-    delegation = DelegationSerializer(read_only=True)
-    est_ouverte = serializers.SerializerMethodField()
-    prochain_statut = serializers.SerializerMethodField()
+    delegation       = DelegationSerializer(read_only=True)
+    est_ouverte      = serializers.SerializerMethodField()
+    prochain_statut  = serializers.SerializerMethodField()
     proprietaire_nom = serializers.SerializerMethodField()
 
     class Meta:
-        model = Pharmacie
+        model  = Pharmacie
         fields = [
             'id', 'nom', 'adresse', 'telephone',
-            'categorie','est_active',
+            'categorie', 'est_active',
             'delegation', 'latitude', 'longitude',
-            'proprietaire','proprietaire_nom',
-            'est_ouverte', 'prochain_statut'
+            'proprietaire', 'proprietaire_nom',
+            'est_ouverte', 'prochain_statut',
         ]
 
     def get_est_ouverte(self, obj):
@@ -106,8 +113,8 @@ class PharmacieListSerializer(serializers.ModelSerializer):
         return obj.verifier_ouverture(now.date(), now.time())
 
     def get_prochain_statut(self, obj):
-        now = datetime.now()
-        jour = now.date().weekday()
+        now     = datetime.now()
+        jour    = now.date().weekday()
         horaire = HoraireTravail.objects.filter(
             pharmacie=obj, jour=jour, est_ouvert=True
         ).first()
@@ -117,57 +124,54 @@ class PharmacieListSerializer(serializers.ModelSerializer):
             elif now.time() < horaire.heure_fermeture:
                 return f"Ferme à {horaire.heure_fermeture.strftime('%H:%M')}"
         return "Voir les horaires"
-    
+
     def get_proprietaire_nom(self, obj):
         if obj.proprietaire:
             first = getattr(obj.proprietaire, 'first_name', '')
-            last = getattr(obj.proprietaire, 'last_name', '')   
-            full = f"{first} {last}".strip()
-            return full or obj.proprietaire.username 
-
+            last  = getattr(obj.proprietaire, 'last_name',  '')
+            full  = f"{first} {last}".strip()
+            return full or getattr(obj.proprietaire, 'username', '')
         return None
 
 
 class PharmacieDetailSerializer(serializers.ModelSerializer):
-    """Serializer complet avec tous les horaires"""
-    delegation = DelegationSerializer(read_only=True)
-    horaires = HoraireTravailSerializer(many=True, read_only=True)
+    delegation       = DelegationSerializer(read_only=True)
+    horaires         = HoraireTravailSerializer(many=True, read_only=True)
     horaires_ramadan = HoraireRamadanSerializer(many=True, read_only=True)
-    gardes = GardeSerializer(many=True, read_only=True)
-    est_ouverte = serializers.SerializerMethodField()
+    gardes           = GardeSerializer(many=True, read_only=True)
+    est_ouverte      = serializers.SerializerMethodField()
     proprietaire_nom = serializers.SerializerMethodField()
 
     class Meta:
-        model = Pharmacie
+        model  = Pharmacie
         fields = [
             'id', 'nom', 'adresse', 'telephone', 'email',
             'categorie', 'est_active',
-            'proprietaire','proprietaire_nom',
+            'proprietaire', 'proprietaire_nom',
             'delegation', 'latitude', 'longitude',
-            'est_ouverte', 'horaires', 'horaires_ramadan', 'gardes'
+            'est_ouverte', 'horaires', 'horaires_ramadan', 'gardes',
         ]
 
     def get_est_ouverte(self, obj):
         now = datetime.now()
         return obj.verifier_ouverture(now.date(), now.time())
-    
+
     def get_proprietaire_nom(self, obj):
         if obj.proprietaire:
             first = getattr(obj.proprietaire, 'first_name', '')
-            last = getattr(obj.proprietaire, 'last_name', '')   
-            full = f"{first} {last}".strip()
-            return full or obj.proprietaire.username 
-
+            last  = getattr(obj.proprietaire, 'last_name',  '')
+            full  = f"{first} {last}".strip()
+            return full or getattr(obj.proprietaire, 'username', '')
         return None
 
 
 class JourFerieSerializer(serializers.ModelSerializer):
     class Meta:
-        model = JourFerieTunisie
+        model  = JourFerieTunisie
         fields = ['id', 'nom', 'date', 'type_ferie']
 
 
 class PeriodeRamadanSerializer(serializers.ModelSerializer):
     class Meta:
-        model = PeriodeRamadan
+        model  = PeriodeRamadan
         fields = ['id', 'annee', 'date_debut', 'date_fin']

@@ -12,12 +12,11 @@ from django.contrib.auth.tokens import default_token_generator
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes
 from django.core.mail import send_mail
+from django.shortcuts import redirect
 from rest_framework_simplejwt.tokens import RefreshToken as JWTRefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from rest_framework.response import Response
-from rest_framework import status
 from .models import Role, Permission, UserRole, RolePermission
 from .serializers import (
     UserSerializer, UserProfileSerializer,
@@ -34,8 +33,10 @@ User = get_user_model()
 # ─── JWT CUSTOM ───────────────────────────────────────────────────────────────
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    username_field = 'email'  # ✅ FIX : forcer le champ email
+
     def validate(self, attrs):
-        email = attrs.get('email') or attrs.get(self.username_field)
+        email = attrs.get('email')
 
         try:
             user = User.objects.get(email=email)
@@ -56,6 +57,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 'Compte suspendu. Contactez l\'administrateur.'
             )
 
+        # ✅ FIX : s'assurer que attrs contient le bon champ pour super()
+        attrs[self.username_field] = email
         data = super().validate(attrs)
 
         data['user'] = {
@@ -72,6 +75,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
+    serializer_class = CustomTokenObtainPairSerializer
+    permission_classes = [AllowAny]          # ✅ FIX : pas besoin d'auth pour login
+    authentication_classes = []              # ✅ FIX : évite crash si pas de token
+
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
         if response.status_code == 200:
@@ -79,8 +86,8 @@ class CustomTokenObtainPairView(TokenObtainPairView):
                 'access_token',
                 response.data['access'],
                 httponly=True,
-                samesite='Lax',      # ou 'None' si HTTPS
-                secure=False,        # True en prod avec HTTPS
+                samesite='Lax',
+                secure=False,
                 path='/'
             )
             response.set_cookie(
@@ -91,9 +98,6 @@ class CustomTokenObtainPairView(TokenObtainPairView):
                 secure=False,
                 path='/'
             )
-            # Optionnel : supprimer les tokens du body
-            del response.data['access']
-            del response.data['refresh']
         return response
 
 
@@ -130,7 +134,6 @@ class UserViewSet(viewsets.ModelViewSet):
             self.permission_classes = [IsAuthenticated]
         return super().get_permissions()
 
-    # ── Mon profil (lecture) ──────────────────────────────────
     @action(detail=False, methods=['get'])
     def me(self, request):
         user = request.user
@@ -138,15 +141,8 @@ class UserViewSet(viewsets.ModelViewSet):
         data['roles'] = RoleSerializer(user.roles.all(), many=True).data
         return Response(data)
 
-    # ── Modifier mon profil ───────────────────────────────────
     @action(detail=False, methods=['put', 'patch'], url_path='me/update')
     def me_update(self, request):
-        """
-        Le pharmacien et le citoyen peuvent modifier :
-        first_name, last_name, email
-        Pas le mot de passe (utiliser /change_password/)
-        Pas le status, is_active, is_staff (réservé admin)
-        """
         user       = request.user
         partial    = request.method == 'PATCH'
         serializer = UserProfileSerializer(
@@ -160,20 +156,14 @@ class UserViewSet(viewsets.ModelViewSet):
             })
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # ── Changer mon mot de passe ──────────────────────────────
     @action(detail=False, methods=['post'], url_path='me/change_password')
     def change_password(self, request):
-        """
-        Change le mot de passe du compte connecté.
-        Nécessite l'ancien mot de passe.
-        """
         user       = request.user
         serializer = ChangePasswordSerializer(data=request.data)
 
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # Vérifier l'ancien mot de passe
         if not user.check_password(serializer.validated_data['ancien_password']):
             return Response(
                 {'error': 'Ancien mot de passe incorrect.'},
@@ -184,17 +174,8 @@ class UserViewSet(viewsets.ModelViewSet):
         user.save()
         return Response({'status': 'Mot de passe modifié avec succès.'})
 
-    # ── Créer un pharmacien (admin uniquement) ────────────────
     @action(detail=False, methods=['post'])
     def create_pharmacien(self, request):
-        """
-        Crée un compte pharmacien :
-        - Mot de passe généré automatiquement
-        - Compte actif directement
-        - Rôle pharmacien assigné
-        - Credentials envoyés par email
-        Body requis : first_name, last_name, email
-        """
         serializer = PharmacienCreateSerializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
@@ -208,7 +189,6 @@ class UserViewSet(viewsets.ModelViewSet):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # ── Assigner un rôle ──────────────────────────────────────
     @action(detail=True, methods=['post'])
     def assign_role(self, request, pk=None):
         user    = self.get_object()
@@ -217,18 +197,11 @@ class UserViewSet(viewsets.ModelViewSet):
             role = Role.objects.get(id=role_id)
             _, created = UserRole.objects.get_or_create(user=user, role=role)
             if created:
-                return Response(
-                    {'status': 'role assigned'},
-                    status=status.HTTP_201_CREATED
-                )
+                return Response({'status': 'role assigned'}, status=status.HTTP_201_CREATED)
             return Response({'status': 'already assigned'})
         except Role.DoesNotExist:
-            return Response(
-                {'error': 'Role not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Role not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    # ── Retirer un rôle ───────────────────────────────────────
     @action(detail=True, methods=['post'])
     def remove_role(self, request, pk=None):
         user    = self.get_object()
@@ -236,83 +209,53 @@ class UserViewSet(viewsets.ModelViewSet):
         deleted, _ = UserRole.objects.filter(user=user, role_id=role_id).delete()
         if deleted:
             return Response({'status': 'role removed'})
-        return Response(
-            {'error': 'role not assigned'},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({'error': 'role not assigned'}, status=status.HTTP_404_NOT_FOUND)
 
-    # ── Lister les rôles d'un user ────────────────────────────
     @action(detail=True, methods=['get'])
     def roles(self, request, pk=None):
         user = self.get_object()
         return Response(RoleSerializer(user.roles.all(), many=True).data)
 
-    # ── TOTP Setup ────────────────────────────────────────────
     @action(detail=False, methods=['post'])
     def totp_setup(self, request):
         email = request.data.get('email')
         if not email:
-            return Response(
-                {'error': 'Email requis.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Email requis.'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             user = User.objects.get(email=email)
         except User.DoesNotExist:
-            return Response(
-                {'error': 'Utilisateur introuvable.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Utilisateur introuvable.'}, status=status.HTTP_404_NOT_FOUND)
 
         if user.is_active and user.totp_enabled:
-            return Response(
-                {'error': 'Compte déjà activé.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Compte déjà activé.'}, status=status.HTTP_400_BAD_REQUEST)
 
         secret = user.generate_totp_secret()
         uri    = user.get_totp_uri()
         return Response(TOTPSetupSerializer({'secret': secret, 'uri': uri}).data)
 
-    # ── TOTP Verify (activation compte citoyen) ───────────────
     @action(detail=False, methods=['post'])
     def totp_verify(self, request):
         email = request.data.get('email')
         code  = request.data.get('code')
 
         if not email or not code:
-            return Response(
-                {'error': 'Email et code requis.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Email et code requis.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             user = User.objects.get(email=email)
         except User.DoesNotExist:
-            return Response(
-                {'error': 'Utilisateur introuvable.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Utilisateur introuvable.'}, status=status.HTTP_404_NOT_FOUND)
 
         if not user.totp_secret:
-            return Response(
-                {'error': 'Faites /totp_setup d\'abord.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Faites /totp_setup d\'abord.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if user.verify_totp(code):
             user.is_active    = True
             user.totp_enabled = True
             user.save(update_fields=['is_active', 'totp_enabled'])
-            return Response({
-                'status': 'Compte activé avec succès. Vous pouvez maintenant vous connecter.'
-            })
-        return Response(
-            {'error': 'Code invalide ou expiré.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+            return Response({'status': 'Compte activé avec succès. Vous pouvez maintenant vous connecter.'})
+        return Response({'error': 'Code invalide ou expiré.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    # ── TOTP Disable ──────────────────────────────────────────
     @action(detail=False, methods=['post'])
     def totp_disable(self, request):
         user       = request.user
@@ -320,23 +263,14 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         if not user.check_password(serializer.validated_data['password']):
-            return Response(
-                {'error': 'Mot de passe incorrect.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Mot de passe incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if user.totp_enabled:
             code = serializer.validated_data.get('code')
             if not code:
-                return Response(
-                    {'error': 'Code TOTP requis pour désactiver.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({'error': 'Code TOTP requis pour désactiver.'}, status=status.HTTP_400_BAD_REQUEST)
             if not user.verify_totp(code):
-                return Response(
-                    {'error': 'Code TOTP invalide.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({'error': 'Code TOTP invalide.'}, status=status.HTTP_400_BAD_REQUEST)
 
         user.totp_enabled = False
         user.totp_secret  = None
@@ -371,34 +305,21 @@ class RoleViewSet(viewsets.ModelViewSet):
         perm_id = request.data.get('permission_id')
         try:
             permission = Permission.objects.get(id=perm_id)
-            _, created = RolePermission.objects.get_or_create(
-                role=role, permission=permission
-            )
+            _, created = RolePermission.objects.get_or_create(role=role, permission=permission)
             if created:
-                return Response(
-                    {'status': 'permission assigned'},
-                    status=status.HTTP_201_CREATED
-                )
+                return Response({'status': 'permission assigned'}, status=status.HTTP_201_CREATED)
             return Response({'status': 'already assigned'})
         except Permission.DoesNotExist:
-            return Response(
-                {'error': 'Permission not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Permission not found'}, status=status.HTTP_404_NOT_FOUND)
 
     @action(detail=True, methods=['post'])
     def remove_permission(self, request, pk=None):
         role    = self.get_object()
         perm_id = request.data.get('permission_id')
-        deleted, _ = RolePermission.objects.filter(
-            role=role, permission_id=perm_id
-        ).delete()
+        deleted, _ = RolePermission.objects.filter(role=role, permission_id=perm_id).delete()
         if deleted:
             return Response({'status': 'permission removed'})
-        return Response(
-            {'error': 'permission not assigned'},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({'error': 'permission not assigned'}, status=status.HTTP_404_NOT_FOUND)
 
 
 class PermissionViewSet(viewsets.ModelViewSet):
@@ -419,86 +340,105 @@ class PermissionViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
 
-# ─── RESET PASSWORD ───────────────────────────────────────────────────────────
+# ─── RESET PASSWORD SÉCURISÉ (cookies HttpOnly) ───────────────────────────────
 
 class RequestPasswordResetView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes     = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
         email = request.data.get('email')
         try:
             user = User.objects.get(email=email)
         except User.DoesNotExist:
-            return Response(
-                {'error': 'Utilisateur non trouvé.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'message': 'Si cet email existe, un lien a été envoyé.'})
 
         token     = default_token_generator.make_token(user)
         uid       = urlsafe_base64_encode(force_bytes(user.pk))
-        reset_url = f"http://localhost:4200/reset-password/{uid}/{token}/"
+        reset_url = f"http://localhost:8000/auth/password-reset/validate/{uid}/{token}/"
 
         send_mail(
-            'Réinitialisation de mot de passe',
-            f'Cliquez sur ce lien pour réinitialiser : {reset_url}',
+            'Réinitialisation de mot de passe – TuniService',
+            f'Bonjour,\n\nCliquez sur ce lien pour réinitialiser votre mot de passe :\n{reset_url}\n\nCe lien expire dans 1 heure.\n\nSi vous n\'avez pas demandé cette réinitialisation, ignorez cet email.',
             'noreply@gestionpharmacie.tn',
             [user.email],
             fail_silently=False,
         )
-        return Response({'message': 'Email de réinitialisation envoyé.'})
+        return Response({'message': 'Si cet email existe, un lien a été envoyé.'})
 
 
-class PasswordResetConfirmView(APIView):
-    permission_classes = [AllowAny]
+class PasswordResetValidateView(APIView):
+    permission_classes     = [AllowAny]
+    authentication_classes = []
 
-    def post(self, request, uidb64, token):
+    def get(self, request, uidb64, token):
         try:
             uid  = urlsafe_base64_decode(uidb64).decode()
             user = User.objects.get(pk=uid)
         except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            return redirect('http://localhost:4200/reset-password?error=invalid')
+
+        if not default_token_generator.check_token(user, token):
+            return redirect('http://localhost:4200/reset-password?error=expired')
+
+        response = redirect('http://localhost:4200/reset-password?step=2')
+        response.set_cookie('reset_uid',   uidb64, httponly=True, samesite='Lax', secure=False, max_age=3600, path='/')
+        response.set_cookie('reset_token', token,  httponly=True, samesite='Lax', secure=False, max_age=3600, path='/')
+        return response
+
+
+class PasswordResetConfirmView(APIView):
+    permission_classes     = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        uidb64 = request.COOKIES.get('reset_uid')
+        token  = request.COOKIES.get('reset_token')
+
+        if not uidb64 or not token:
             return Response(
-                {'error': 'Lien invalide.'},
+                {'error': 'Session expirée. Veuillez refaire une demande de réinitialisation.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        try:
+            uid  = urlsafe_base64_decode(uidb64).decode()
+            user = User.objects.get(pk=uid)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            return Response({'error': 'Lien invalide.'}, status=status.HTTP_400_BAD_REQUEST)
+
         if not default_token_generator.check_token(user, token):
-            return Response(
-                {'error': 'Token invalide ou expiré.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Token invalide ou expiré.'}, status=status.HTTP_400_BAD_REQUEST)
 
         new_password = request.data.get('new_password')
         if not new_password:
-            return Response(
-                {'error': 'Nouveau mot de passe requis.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Nouveau mot de passe requis.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Vérification TOTP si activé (citoyen)
         if user.totp_enabled:
             totp_code = request.data.get('totp_code')
             if not totp_code:
-                return Response(
-                    {'error': 'Code TOTP requis.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({'error': 'Code TOTP requis.'}, status=status.HTTP_400_BAD_REQUEST)
             if not user.verify_totp(totp_code):
-                return Response(
-                    {'error': 'Code TOTP invalide.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({'error': 'Code TOTP invalide.'}, status=status.HTTP_400_BAD_REQUEST)
 
         user.set_password(new_password)
         user.save()
-        return Response({'message': 'Mot de passe réinitialisé avec succès.'})
 
+        response = Response({'message': 'Mot de passe réinitialisé avec succès.'})
+        response.delete_cookie('reset_uid',   path='/', samesite='Lax')
+        response.delete_cookie('reset_token', path='/', samesite='Lax')
+        return response
+
+
+# ─── LOGOUT & TOKEN REFRESH ───────────────────────────────────────────────────
 
 class LogoutView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes     = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
         refresh_token = request.COOKIES.get('refresh_token')
-        
+
         if refresh_token:
             try:
                 token = JWTRefreshToken(refresh_token)
@@ -507,69 +447,28 @@ class LogoutView(APIView):
                 pass
 
         response = Response({'message': 'Déconnecté.'})
-        
-        # Supprime les cookies avec les mêmes paramètres qu'à la création
-        response.delete_cookie(
-            'access_token',
-            path='/',
-            samesite='Lax'
-        )
-        response.delete_cookie(
-            'refresh_token',
-            path='/',
-            samesite='Lax'
-        )
-        
+        response.delete_cookie('access_token',  path='/', samesite='Lax')
+        response.delete_cookie('refresh_token', path='/', samesite='Lax')
         return response
 
+
 class CookieTokenRefreshView(TokenRefreshView):
+    permission_classes     = [AllowAny]
+    authentication_classes = []
+
     def post(self, request, *args, **kwargs):
         refresh_token = request.COOKIES.get('refresh_token')
         if not refresh_token:
             return Response({'detail': 'No refresh token'}, status=400)
 
         try:
-            refresh = RefreshToken(refresh_token)
-            access = str(refresh.access_token)
-            # Générer un nouveau refresh token (rotation)
+            refresh     = RefreshToken(refresh_token)
+            access      = str(refresh.access_token)
             new_refresh = str(refresh)
         except Exception:
             return Response({'detail': 'Invalid refresh token'}, status=400)
 
         response = Response({'detail': 'Token refreshed'})
-        response.set_cookie(
-            'access_token', access,
-            httponly=True, samesite='Lax', secure=False, path='/'
-        )
-        response.set_cookie(
-            'refresh_token', new_refresh,
-            httponly=True, samesite='Lax', secure=False, path='/'
-        )
-        return response
-    
-class CustomTokenObtainPairView(TokenObtainPairView):
-    serializer_class = CustomTokenObtainPairSerializer
-
-    def post(self, request, *args, **kwargs):
-        response = super().post(request, *args, **kwargs)
-        if response.status_code == 200:
-            response.set_cookie(
-                'access_token',
-                response.data['access'],
-                httponly=True,
-                samesite='Lax',
-                secure=False,
-                path='/'
-            )
-            response.set_cookie(
-                'refresh_token',
-                response.data['refresh'],
-                httponly=True,
-                samesite='Lax',
-                secure=False,
-                path='/'
-            )
-            # Ne pas supprimer les tokens pour l'instant
-            # del response.data['access']
-            # del response.data['refresh']
+        response.set_cookie('access_token',  access,      httponly=True, samesite='Lax', secure=False, path='/')
+        response.set_cookie('refresh_token', new_refresh, httponly=True, samesite='Lax', secure=False, path='/')
         return response

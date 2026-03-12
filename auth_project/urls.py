@@ -1,18 +1,26 @@
-# auth_project/urls.py
 from django.contrib import admin
 from django.urls import path, include
-from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework.routers import DefaultRouter
 from accounts.views import CookieTokenRefreshView, CustomTokenObtainPairView, LogoutView
-from rest_framework_simplejwt.views import TokenBlacklistView
+    
+
+router = DefaultRouter()
 
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/auth/', include('accounts.urls')),
-    path('api/token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
-    #path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    path('api/localisations/', include('localisations.urls')),
+    path('auth/', include(router.urls)),
+
+
+    # ✅ accounts EN PREMIER (sinon pharmacies.urls prend tout)
+    path('api/', include('accounts.urls')),
     path('api/', include('pharmacies.urls')),
-    path('api/token/logout/',  LogoutView.as_view()),  
+
+    # Tokens directs
+    path('api/token/',         CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/token/logout/',  LogoutView.as_view()),
     path('api/token/refresh/', CookieTokenRefreshView.as_view()),
+
+    # Autres apps
+    path('api/localisations/', include('localisations.urls')),
 ]

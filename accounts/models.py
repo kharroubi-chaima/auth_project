@@ -56,7 +56,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         import pyotp
         return pyotp.totp.TOTP(self.totp_secret).provisioning_uri(
             name=self.email,
-            issuer_name="GestionPharmacie"
+            issuer_name= "GestionPharmacie"
         )
 
     def verify_totp(self, code):

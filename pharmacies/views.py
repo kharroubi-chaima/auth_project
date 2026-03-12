@@ -1,6 +1,6 @@
 # pharmacies/views.py
 from rest_framework import viewsets, filters, status
-from rest_framework.decorators import action, api_view
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
@@ -9,27 +9,14 @@ from datetime import datetime, date
 from pharmacies.filters import PharmacieFilter
 from .models import *
 from .serializers import *
-from .permissions import require_perm 
+from .permissions import require_perm
 
 
-"""class PharmacieViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Pharmacie.objects.filter(
-        est_active=True
-    ).select_related('delegation__gouvernorat')
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['delegation', 'delegation__gouvernorat']
-    search_fields = ['nom', 'adresse', 'telephone']
-    permission_classes = [AllowAny]
-
-    def get_serializer_class(self):
-        if self.action == 'retrieve':
-            return PharmacieDetailSerializer
-        return PharmacieListSerializer"""
 class PharmacieViewSet(viewsets.ModelViewSet):
     queryset = Pharmacie.objects.filter(est_active=True).select_related('delegation__gouvernorat')
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['delegation', 'delegation__gouvernorat']
-    search_fields = ['nom', 'adresse', 'telephone']
+    filter_backends  = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_class  = PharmacieFilter                          # ✅ utilise le filtre personnalisé
+    search_fields    = ['nom', 'adresse', 'telephone']
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve', 'ouvertes', 'garde', 'proches', 'statut']:
@@ -59,15 +46,12 @@ class PharmacieViewSet(viewsets.ModelViewSet):
             if p.verifier_ouverture(now.date(), now.time())
         ]
         serializer = PharmacieListSerializer(ouvertes, many=True)
-        return Response({
-            'count': len(ouvertes),
-            'pharmacies': serializer.data
-        })
+        return Response({'count': len(ouvertes), 'pharmacies': serializer.data})
 
     # ─── GET /api/pharmacies/garde/ ──────────────────────────
     @action(detail=False, methods=['get'])
     def garde(self, request):
-        today = date.today()
+        today  = date.today()
         gardes = GardePharmacie.objects.filter(
             date_debut__lte=today,
             date_fin__gte=today
@@ -77,24 +61,24 @@ class PharmacieViewSet(viewsets.ModelViewSet):
         for g in gardes:
             p = g.pharmacie
             data.append({
-                'id': str(p.id),
-                'nom': p.nom,
-                'adresse': p.adresse,
-                'telephone': p.telephone,
-                'latitude': str(p.latitude) if p.latitude else None,
-                'longitude': str(p.longitude) if p.longitude else None,
-                'delegation': p.delegation.nom if p.delegation else None,
-                'type_garde': g.get_type_garde_display(),
+                'id'         : str(p.id),
+                'nom'        : p.nom,
+                'adresse'    : p.adresse,
+                'telephone'  : p.telephone,
+                'latitude'   : str(p.latitude)  if p.latitude  else None,
+                'longitude'  : str(p.longitude) if p.longitude else None,
+                'delegation' : p.delegation.nom if p.delegation else None,
+                'type_garde' : g.get_type_garde_display(),
                 'heure_debut': g.heure_debut,
-                'heure_fin': g.heure_fin,
+                'heure_fin'  : g.heure_fin,
             })
         return Response({'count': len(data), 'pharmacies_garde': data})
 
     # ─── GET /api/pharmacies/proches/?lat=&lng=&rayon= ───────
     @action(detail=False, methods=['get'])
     def proches(self, request):
-        lat = request.query_params.get('lat')
-        lng = request.query_params.get('lng')
+        lat   = request.query_params.get('lat')
+        lng   = request.query_params.get('lng')
         rayon = float(request.query_params.get('rayon', 5))
 
         if not lat or not lng:
@@ -103,8 +87,8 @@ class PharmacieViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        lat, lng = float(lat), float(lng)
-        now = datetime.now()
+        lat, lng   = float(lat), float(lng)
+        now        = datetime.now()
         pharmacies = self.get_queryset()
 
         resultats = []
@@ -127,52 +111,37 @@ class PharmacieViewSet(viewsets.ModelViewSet):
     # ─── GET /api/pharmacies/{id}/statut/?date=&heure= ───────
     @action(detail=True, methods=['get'])
     def statut(self, request, pk=None):
-        pharmacie = self.get_object()
-        date_param = request.query_params.get('date', str(date.today()))
+        pharmacie   = self.get_object()
+        date_param  = request.query_params.get('date',  str(date.today()))
         heure_param = request.query_params.get('heure', datetime.now().strftime('%H:%M'))
 
-        d = datetime.strptime(date_param, '%Y-%m-%d').date()
+        d = datetime.strptime(date_param,  '%Y-%m-%d').date()
         h = datetime.strptime(heure_param, '%H:%M').time()
 
         est_ouverte = pharmacie.verifier_ouverture(d, h)
-        jour_ferie = JourFerieTunisie.objects.filter(date=d).first()
+        jour_ferie  = JourFerieTunisie.objects.filter(date=d).first()
 
         return Response({
-            'pharmacie': pharmacie.nom,
+            'pharmacie'  : pharmacie.nom,
             'est_ouverte': est_ouverte,
-            'date': date_param,
-            'heure': heure_param,
-            'jour_ferie': jour_ferie.nom if jour_ferie else None,
+            'date'       : date_param,
+            'heure'      : heure_param,
+            'jour_ferie' : jour_ferie.nom if jour_ferie else None,
         })
 
 
-# ─── GET /api/jours-feries/?annee= ───────────────────────────
-@api_view(['GET'])
-def jours_feries_annee(request):
-    annee = request.query_params.get('annee', date.today().year)
-    jours = JourFerieTunisie.objects.filter(
-        date__year=annee
-    ).order_by('date')
-    serializer = JourFerieSerializer(jours, many=True)
-    return Response(serializer.data)
-
-
-# ─── GET /api/ramadan/ ────────────────────────────────────────
-@api_view(['GET'])
-def periodes_ramadan(request):
-    periodes = PeriodeRamadan.objects.all().order_by('-annee')
-    serializer = PeriodeRamadanSerializer(periodes, many=True)
-    return Response(serializer.data)
-
-# ─── 1. Liste TOUTES les pharmacies (actives + inactives) pour l'admin ────────
+# ─── Admin ViewSet — toutes les pharmacies ────────────────────
 class PharmacieAdminViewSet(viewsets.ModelViewSet):
 
-    queryset = Pharmacie.objects.all().select_related('delegation__gouvernorat')
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['categorie', 'est_active', 'delegation__gouvernorat']
-    search_fields = ['nom', 'adresse', 'telephone']
+    filter_backends    = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_class    = PharmacieFilter        # ✅ remplace filterset_fields
+    search_fields      = ['nom', 'adresse', 'telephone']
     permission_classes = [IsAuthenticated]
-    queryset = Pharmacie.objects.all().select_related('delegation__gouvernorat','proprietaire')
+
+    def get_queryset(self):
+        return Pharmacie.objects.all().select_related(
+            'delegation__gouvernorat', 'proprietaire'
+        )
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
@@ -180,28 +149,16 @@ class PharmacieAdminViewSet(viewsets.ModelViewSet):
         if self.action == 'retrieve':
             return PharmacieDetailSerializer
         return PharmacieListSerializer
-    
-    def get_queryset(self):
-        user = self.request.user
-        if user.has_perm('pharmacies.view_all_pharmacies') or user.is_staff:
-            return Pharmacie.objects.all().select_related('delegation__gouvernorat', 'proprietaire')
-        return Pharmacie.objects.all().select_related('delegation__gouvernorat','proprietaire')
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
-            return [IsAuthenticated()]
-        elif self.action in ['update', 'partial_update', 'destroy']:
-            return [IsAuthenticated()]  # contrôle dans perform_update/destroy
         return [IsAuthenticated()]
-    
+
     def perform_create(self, serializer):
         serializer.save(proprietaire=self.request.user)
-        
-        
+
     def perform_update(self, serializer):
         pharmacie = self.get_object()
-        user = self.request.user
-        # Seul le propriétaire ou admin peut modifier
+        user      = self.request.user
         if not user.is_staff and str(pharmacie.proprietaire_id) != str(user.id):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Vous ne pouvez modifier que votre propre pharmacie.")
@@ -217,18 +174,35 @@ class PharmacieAdminViewSet(viewsets.ModelViewSet):
     # ─── PATCH /api/admin/pharmacies/{id}/toggle_active/ ─────
     @action(detail=True, methods=['patch'])
     def toggle_active(self, request, pk=None):
-        """Active ou désactive une pharmacie"""
-        pharmacie = self.get_object()
+        pharmacie            = self.get_object()
         pharmacie.est_active = not pharmacie.est_active
         pharmacie.save()
         return Response({
             'message'   : f"Pharmacie {'activée' if pharmacie.est_active else 'désactivée'}.",
-            'est_active': pharmacie.est_active
+            'est_active': pharmacie.est_active,
         })
 
 
-# ─── 2. Stats pour le dashboard ───────────────────────────────────────────────
+# ─── GET /api/jours-feries/?annee= ───────────────────────────
 @api_view(['GET'])
+def jours_feries_annee(request):
+    annee = request.query_params.get('annee', date.today().year)
+    jours = JourFerieTunisie.objects.filter(date__year=annee).order_by('date')
+    serializer = JourFerieSerializer(jours, many=True)
+    return Response(serializer.data)
+
+
+# ─── GET /api/ramadan/ ────────────────────────────────────────
+@api_view(['GET'])
+def periodes_ramadan(request):
+    periodes   = PeriodeRamadan.objects.all().order_by('-annee')
+    serializer = PeriodeRamadanSerializer(periodes, many=True)
+    return Response(serializer.data)
+
+
+# ─── Stats dashboard ──────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def dashboard_stats(request):
     from django.utils import timezone
     from accounts.models import User
@@ -243,30 +217,29 @@ def dashboard_stats(request):
         'pharmacies_actives'  : Pharmacie.objects.filter(est_active=True).count(),
         'pharmacies_inactives': Pharmacie.objects.filter(est_active=False).count(),
         'nouvelles_ce_mois'   : Pharmacie.objects.filter(created_at__gte=this_month).count(),
-        'gardes_ce_mois': GardePharmacie.objects.filter(
+        'gardes_ce_mois'      : GardePharmacie.objects.filter(
             date_debut__year=now.year,
             date_fin__month=now.month,
         ).count(),
         'roles': {
-            'citoyens'        : User.objects.filter(roles__name='citoyen').count(),
-            'pharmaciens'     : User.objects.filter(roles__name='pharmacien').count(),
-            'administrateurs' : User.objects.filter(roles__name='administrateur').count(),
+            'citoyens'       : User.objects.filter(roles__name='citoyen').count(),
+            'pharmaciens'    : User.objects.filter(roles__name='pharmacien').count(),
+            'administrateurs': User.objects.filter(roles__name='administrateur').count(),
         }
     })
 
 
-# ─── 3. CRUD Jours fériés (admin) ─────────────────────────────────────────────
+# ─── CRUD Jours fériés (admin) ────────────────────────────────
 class JourFerieViewSet(viewsets.ModelViewSet):
-    queryset         = JourFerieTunisie.objects.all().order_by('date')
-    serializer_class = JourFerieSerializer
+    queryset           = JourFerieTunisie.objects.all().order_by('date')
+    serializer_class   = JourFerieSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends  = [DjangoFilterBackend]
-    filterset_fields = ['date__year', 'type_ferie']
+    filter_backends    = [DjangoFilterBackend]
+    filterset_fields   = ['date__year', 'type_ferie']
 
 
-# ─── 4. CRUD Période Ramadan (admin) ──────────────────────────────────────────
+# ─── CRUD Période Ramadan (admin) ─────────────────────────────
 class PeriodeRamadanViewSet(viewsets.ModelViewSet):
-    queryset         = PeriodeRamadan.objects.all().order_by('-annee')
-    serializer_class = PeriodeRamadanSerializer
+    queryset           = PeriodeRamadan.objects.all().order_by('-annee')
+    serializer_class   = PeriodeRamadanSerializer
     permission_classes = [IsAuthenticated]
-
