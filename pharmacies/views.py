@@ -4,12 +4,13 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from datetime import datetime, date
-
+from datetime import datetime, date , time
 from pharmacies.filters import PharmacieFilter
 from .models import *
 from .serializers import *
 from .permissions import require_perm
+from .models import PeriodeRamadan, HoraireTravail
+
 
 
 class PharmacieViewSet(viewsets.ModelViewSet):
@@ -152,10 +153,73 @@ class PharmacieAdminViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         return [IsAuthenticated()]
-
+    
     def perform_create(self, serializer):
-        serializer.save(proprietaire=self.request.user)
+        pharmacie = serializer.save(proprietaire=self.request.user)
+        self._generer_horaires(pharmacie)
+        
+        
+    def _generer_horaires(self, pharmacie):
+        aujourd_hui = date.today()
+        en_ramadan  = PeriodeRamadan.objects.filter(
+            date_debut__lte=aujourd_hui,
+            date_fin__gte=aujourd_hui
+        ).exists()
 
+        if pharmacie.categorie == 'A':
+            if en_ramadan:
+                horaires = [
+                    *[{
+                        'jour': j, 'est_ouvert': True,
+                        'heure_ouverture': time(8, 30),
+                        'heure_fermeture': time(17, 0),
+                        'pause_debut': None, 'pause_fin': None,
+                    } for j in range(5)],
+                    {
+                        'jour': 5, 'est_ouvert': True,
+                        'heure_ouverture': time(8, 30),
+                        'heure_fermeture': time(13, 0),
+                        'pause_debut': None, 'pause_fin': None,
+                    },
+                    {
+                        'jour': 6, 'est_ouvert': False,
+                        'heure_ouverture': None, 'heure_fermeture': None,
+                        'pause_debut': None, 'pause_fin': None,
+                    },
+                ]
+            else:
+                horaires = [
+                    *[{
+                        'jour': j, 'est_ouvert': True,
+                        'heure_ouverture': time(8, 30),
+                        'heure_fermeture': time(19, 30),
+                        'pause_debut':     time(13, 0),
+                        'pause_fin':       time(15, 0),
+                    } for j in range(5)],
+                    {
+                        'jour': 5, 'est_ouvert': True,
+                        'heure_ouverture': time(8, 30),
+                        'heure_fermeture': time(13, 0),
+                        'pause_debut': None, 'pause_fin': None,
+                    },
+                    {
+                        'jour': 6, 'est_ouvert': False,
+                        'heure_ouverture': None, 'heure_fermeture': None,
+                        'pause_debut': None, 'pause_fin': None,
+                    },
+                ]
+        else:
+            horaires = [{
+                'jour': j, 'est_ouvert': True,
+                'heure_ouverture': time(19, 30),
+                'heure_fermeture': time(8, 30),
+                'pause_debut': None, 'pause_fin': None,
+            } for j in range(7)]
+
+        for h in horaires:
+            HoraireTravail.objects.get_or_create(
+                pharmacie=pharmacie, jour=h['jour'], defaults=h
+            )
     def perform_update(self, serializer):
         pharmacie = self.get_object()
         user      = self.request.user

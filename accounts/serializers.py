@@ -7,33 +7,59 @@ import string
 from .models import User, Role, Permission, UserRole, RolePermission
 
 
+# ── Must be defined before UserSerializer ──────────────────────────────────────
+class RoleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = Role
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at']
+
+
+class PermissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = Permission
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at']
+
+
+class UserRoleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = UserRole
+        fields = '__all__'
+
+
+class RolePermissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = RolePermission
+        fields = '__all__'
+
+
+# ── User serializers ───────────────────────────────────────────────────────────
 class UserSerializer(serializers.ModelSerializer):
     """Serializer pour l'inscription publique (citoyen)"""
     password = serializers.CharField(
         write_only=True, required=True,
         style={'input_type': 'password'}
     )
+    roles = RoleSerializer(many=True, read_only=True)
 
     class Meta:
         model  = User
         fields = [
             'id', 'first_name', 'last_name', 'email',
             'password', 'status', 'date_joined',
-            'is_active', 'is_staff', 'totp_enabled'
+            'is_active', 'is_staff', 'totp_enabled', 'roles'
         ]
         read_only_fields = ['id', 'date_joined', 'is_active', 'totp_enabled']
 
     def create(self, validated_data):
         password = validated_data.pop('password')
         user = User.objects.create_user(password=password, **validated_data)
-
-        # Rôle citoyen par défaut
         try:
             role_citoyen = Role.objects.get(name='citoyen')
             UserRole.objects.get_or_create(user=user, role=role_citoyen)
         except Role.DoesNotExist:
             pass
-
         return user
 
     def update(self, instance, validated_data):
@@ -103,11 +129,6 @@ class PharmacienCreateSerializer(serializers.ModelSerializer):
         ]
 
     def _generer_mot_de_passe(self, longueur=12):
-        """
-        Génère un mot de passe aléatoire sécurisé.
-        Garantit : 1 majuscule, 1 minuscule, 1 chiffre, 1 symbole.
-        Exemple : "Kx7#mP2$nQ9!"
-        """
         alphabet = (
             string.ascii_uppercase +
             string.ascii_lowercase +
@@ -126,25 +147,15 @@ class PharmacienCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         password_clair = self._generer_mot_de_passe()
-
-        # Créer le compte actif directement
-        user = User.objects.create_user(
-            password=password_clair,
-            **validated_data
-        )
+        user = User.objects.create_user(password=password_clair, **validated_data)
         user.is_active = True
         user.save(update_fields=['is_active'])
-
-        # Assigner le rôle pharmacien
         try:
             role_pharmacien = Role.objects.get(name='pharmacien')
             UserRole.objects.get_or_create(user=user, role=role_pharmacien)
         except Role.DoesNotExist:
             pass
-
-        # Envoyer les credentials par email
         self._envoyer_email_credentials(user, password_clair)
-
         return user
 
     def _envoyer_email_credentials(self, user, password_clair):
@@ -167,7 +178,6 @@ Après votre première connexion, vous pouvez :
 Cordialement,
 L'équipe Gestion Pharmacie
         """.strip()
-
         send_mail(
             subject        = sujet,
             message        = message,
@@ -177,6 +187,7 @@ L'équipe Gestion Pharmacie
         )
 
 
+# ── TOTP serializers ───────────────────────────────────────────────────────────
 class TOTPSetupSerializer(serializers.Serializer):
     secret = serializers.CharField(read_only=True)
     uri    = serializers.CharField(read_only=True)
@@ -197,29 +208,3 @@ class TOTPVerifySerializer(serializers.Serializer):
 class TOTPDisableSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
     code     = serializers.CharField(max_length=6, min_length=6, required=False)
-
-
-class RoleSerializer(serializers.ModelSerializer):
-    class Meta:
-        model  = Role
-        fields = '__all__'
-        read_only_fields = ['id', 'created_at']
-
-
-class PermissionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model  = Permission
-        fields = '__all__'
-        read_only_fields = ['id', 'created_at']
-
-
-class UserRoleSerializer(serializers.ModelSerializer):
-    class Meta:
-        model  = UserRole
-        fields = '__all__'
-
-
-class RolePermissionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model  = RolePermission
-        fields = '__all__'

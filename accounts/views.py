@@ -355,7 +355,7 @@ class RequestPasswordResetView(APIView):
 
         token     = default_token_generator.make_token(user)
         uid       = urlsafe_base64_encode(force_bytes(user.pk))
-        reset_url = f"http://localhost:8000/auth/password-reset/validate/{uid}/{token}/"
+        reset_url = f"http://localhost:4200/auth/password-reset/validate/{uid}/{token}/"
 
         send_mail(
             'Réinitialisation de mot de passe – TuniService',
@@ -381,23 +381,24 @@ class PasswordResetValidateView(APIView):
         if not default_token_generator.check_token(user, token):
             return redirect('http://localhost:4200/reset-password?error=expired')
 
-        response = redirect('http://localhost:4200/reset-password?step=2')
-        response.set_cookie('reset_uid',   uidb64, httponly=True, samesite='Lax', secure=False, max_age=3600, path='/')
-        response.set_cookie('reset_token', token,  httponly=True, samesite='Lax', secure=False, max_age=3600, path='/')
-        return response
-
+        #  Passer uid et token directement dans l'URL Angular
+        return redirect(
+            f'http://localhost:4200/reset-password?step=2&uid={uidb64}&token={token}'
+        )
+        
 
 class PasswordResetConfirmView(APIView):
     permission_classes     = [AllowAny]
     authentication_classes = []
 
     def post(self, request):
-        uidb64 = request.COOKIES.get('reset_uid')
-        token  = request.COOKIES.get('reset_token')
+        # ✅ Lire uid et token depuis le body (envoyés par Angular)
+        uidb64 = request.data.get('uid')
+        token  = request.data.get('token')
 
         if not uidb64 or not token:
             return Response(
-                {'error': 'Session expirée. Veuillez refaire une demande de réinitialisation.'},
+                {'error': 'Session expirée. Veuillez refaire une demande.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -423,12 +424,7 @@ class PasswordResetConfirmView(APIView):
 
         user.set_password(new_password)
         user.save()
-
-        response = Response({'message': 'Mot de passe réinitialisé avec succès.'})
-        response.delete_cookie('reset_uid',   path='/', samesite='Lax')
-        response.delete_cookie('reset_token', path='/', samesite='Lax')
-        return response
-
+        return Response({'message': 'Mot de passe réinitialisé avec succès.'})
 
 # ─── LOGOUT & TOKEN REFRESH ───────────────────────────────────────────────────
 

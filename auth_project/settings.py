@@ -34,9 +34,11 @@ INSTALLED_APPS = [
     'accounts',
     'localisations',
     'pharmacies.apps.PharmaciesConfig',
-    'auth_project',
+    #'auth_project',
     'rest_framework_simplejwt.token_blacklist',
     'django_crontab',
+    'stock',
+    'reservations',
 ]
 
 CRONJOBS = [

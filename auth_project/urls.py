@@ -23,4 +23,9 @@ urlpatterns = [
 
     # Autres apps
     path('api/localisations/', include('localisations.urls')),
+    
+    # urls.py principal
+    path('api/stock/', include('stock.urls')),
+    path('api/reservations/', include('reservations.urls')),
+
 ]
