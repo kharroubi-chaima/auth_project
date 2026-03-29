@@ -90,6 +90,7 @@ class GardeSerializer(serializers.ModelSerializer):
             'date_debut', 'date_fin',
             'heure_debut', 'heure_fin',
         ]
+        
 
 
 class PharmacieListSerializer(serializers.ModelSerializer):
@@ -164,7 +165,19 @@ class PharmacieDetailSerializer(serializers.ModelSerializer):
             return full or getattr(obj.proprietaire, 'username', '')
         return None
 
+class MesGardesSerializer(serializers.ModelSerializer):
+    type_garde_nom = serializers.CharField(source='get_type_garde_display', read_only=True)
+    heure_debut    = serializers.TimeField(read_only=True)
+    heure_fin      = serializers.TimeField(read_only=True)
 
+    class Meta:
+        model  = GardePharmacie
+        fields = [
+            'id', 'type_garde', 'type_garde_nom',
+            'date_debut', 'date_fin',
+            'heure_debut', 'heure_fin',
+        ]
+        
 class JourFerieSerializer(serializers.ModelSerializer):
     class Meta:
         model  = JourFerieTunisie

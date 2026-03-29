@@ -7,6 +7,7 @@ from .views import (
     JourFerieViewSet,
     PeriodeRamadanViewSet,
     jours_feries_annee,
+    mes_gardes,
     periodes_ramadan,
     dashboard_stats,
 )
@@ -19,7 +20,8 @@ router.register(r'periodes-ramadan',  PeriodeRamadanViewSet,  basename='periode-
 
 urlpatterns = [
     path('', include(router.urls)),
-    path('jours-feries/',    jours_feries_annee, name='jours-feries'),   # ✅ garder — lecture par année
-    path('ramadan/',         periodes_ramadan,   name='ramadan'),        # ✅ garder — lecture simple
-    path('dashboard/stats/', dashboard_stats,    name='dashboard-stats'),# ← nouveau
+    path('jours-feries/',    jours_feries_annee, name='jours-feries'),  
+    path('ramadan/',         periodes_ramadan,   name='ramadan'),       
+    path('dashboard/stats/', dashboard_stats,    name='dashboard-stats'),
+    path('pharmacien/mes-gardes/', mes_gardes, name='mes-gardes'),
 ]

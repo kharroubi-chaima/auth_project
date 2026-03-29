@@ -303,3 +303,20 @@ class MarquerRecupereeView(APIView):
         reservation.save(update_fields=['statut'])
 
         return Response({'detail': 'Récupération confirmée. Stock mis à jour.'})
+    
+# reservations/views.py (ajoutez cette classe)
+
+class PharmacienReservationsView(APIView):
+    """GET /api/reservations/pharmacien/"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not hasattr(request.user, 'pharmacie') or not request.user.pharmacie:
+            return Response({'detail': 'Accès réservé aux pharmaciens.'}, status=status.HTTP_403_FORBIDDEN)
+
+        pharmacie = request.user.pharmacie
+        reservations = Reservation.objects.filter(
+            stock__pharmacie=pharmacie
+        ).select_related('stock__pharmacie', 'medicament', 'citoyen')
+        serializer = ReservationSerializer(reservations, many=True)
+        return Response(serializer.data)

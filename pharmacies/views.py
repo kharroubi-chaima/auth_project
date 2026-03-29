@@ -245,6 +245,29 @@ class PharmacieAdminViewSet(viewsets.ModelViewSet):
             'message'   : f"Pharmacie {'activée' if pharmacie.est_active else 'désactivée'}.",
             'est_active': pharmacie.est_active,
         })
+        
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def mes_gardes(request):
+    """Gardes de la pharmacie du pharmacien connecté."""
+    pharmacie = Pharmacie.objects.filter(
+        proprietaire=request.user,
+        est_active=True
+    ).first()
+
+    if not pharmacie:
+        return Response({'detail': 'Aucune pharmacie associée.'}, status=404)
+
+    gardes = GardePharmacie.objects.filter(
+        pharmacie=pharmacie
+    ).order_by('date_debut')
+
+    serializer = MesGardesSerializer(gardes, many=True)
+    return Response({
+        'pharmacie_nom': pharmacie.nom,
+        'categorie':     pharmacie.categorie,
+        'gardes':        serializer.data,
+    })
 
 
 # ─── GET /api/jours-feries/?annee= ───────────────────────────

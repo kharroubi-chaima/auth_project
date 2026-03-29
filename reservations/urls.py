@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    PharmacienReservationsView,
     PharmaciesOuvertesView,
     RecherchePharmacieView,
     ReservationListCreateView,
@@ -13,4 +14,5 @@ urlpatterns = [
     path('',                      ReservationListCreateView.as_view(), name='reservation-list-create'),
     path('<int:pk>/annuler/',     AnnulerReservationView.as_view(),    name='reservation-annuler'),
     path('<int:pk>/recuperee/',   MarquerRecupereeView.as_view(),      name='reservation-recuperee'),
+    path('pharmacien/', PharmacienReservationsView.as_view(), name='pharmacien-reservations'),
 ]
