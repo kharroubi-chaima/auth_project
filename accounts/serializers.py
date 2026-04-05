@@ -46,7 +46,7 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model  = User
         fields = [
-            'id', 'first_name', 'last_name', 'email',
+            'id', 'first_name', 'last_name', 'email','telephone',
             'password', 'status', 'date_joined',
             'is_active', 'is_staff', 'totp_enabled', 'roles'
         ]
@@ -81,7 +81,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model  = User
         fields = [
-            'id', 'first_name', 'last_name', 'email',
+            'id', 'first_name', 'last_name', 'email', 'telephone',
             'status', 'date_joined', 'is_active',
             'is_staff', 'totp_enabled'
         ]

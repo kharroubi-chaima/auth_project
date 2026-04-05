@@ -28,6 +28,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     first_name   = models.CharField(max_length=150)
     last_name    = models.CharField(max_length=150)
     email        = models.EmailField(unique=True)
+    telephone    = models.CharField(max_length=20, blank=True)
     status       = models.CharField(
         max_length=20,
         choices=[('active', 'Active'), ('suspended', 'Suspended')],

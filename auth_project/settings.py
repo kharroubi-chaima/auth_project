@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'django_crontab',
     'stock',
     'reservations',
+    'urgences',
 ]
 
 CRONJOBS = [
@@ -145,6 +146,13 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:4200",
     "http://127.0.0.1:4200",   # ✅ ajouté
 ]
+
+
+# Twilio SMS
+TWILIO_ACCOUNT_SID = 'AC2c04d13813aac77234eb22b2463687c8'
+TWILIO_AUTH_TOKEN  = 'c25e35b14462c2385f0aaad415fcb7b3'
+TWILIO_FROM_NUMBER = '+16624282878'   
+
 
 CORS_ALLOW_CREDENTIALS = True  # ✅ indispensable pour les cookies
 

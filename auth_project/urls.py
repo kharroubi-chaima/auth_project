@@ -27,5 +27,6 @@ urlpatterns = [
     # urls.py principal
     path('api/stock/', include('stock.urls')),
     path('api/reservations/', include('reservations.urls')),
+    path('api/urgences/', include('urgences.urls')),
 
 ]
