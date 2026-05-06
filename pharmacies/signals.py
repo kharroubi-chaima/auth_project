@@ -51,6 +51,7 @@ def generer_donnees_pharmacie(sender, instance, created, **kwargs):
     # ── 2. Horaires Ramadan (seulement cat A) ──────────────────
     if instance.categorie == 'A':
         periode = PeriodeRamadan.objects.filter(
+            date_debut__lte=date.today(),
             date_fin__gte=date.today()
         ).first()
         print(f"🌙 Période Ramadan trouvée : {periode}")

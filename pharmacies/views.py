@@ -1,23 +1,25 @@
-# pharmacies/views.py
-from rest_framework import viewsets, filters, status
+from rest_framework import request, viewsets, filters, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from datetime import datetime, date , time
+from datetime import datetime, date, time
 from pharmacies.filters import PharmacieFilter
 from .models import *
 from .serializers import *
 from .permissions import require_perm
 from .models import PeriodeRamadan, HoraireTravail
+from accounts.permissions import IsSuperAdmin
+from django.contrib.auth import get_user_model
+from accounts.models import Role
 
-
+User = get_user_model()
 
 class PharmacieViewSet(viewsets.ModelViewSet):
     queryset = Pharmacie.objects.filter(est_active=True).select_related('delegation__gouvernorat')
-    filter_backends  = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_class  = PharmacieFilter                          # ✅ utilise le filtre personnalisé
-    search_fields    = ['nom', 'adresse', 'telephone']
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_class = PharmacieFilter
+    search_fields = ['nom', 'adresse', 'telephone']
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve', 'ouvertes', 'garde', 'proches', 'statut']:
@@ -37,112 +39,187 @@ class PharmacieViewSet(viewsets.ModelViewSet):
             return PharmacieDetailSerializer
         return PharmacieListSerializer
 
-    # ─── GET /api/pharmacies/ouvertes/ ───────────────────────
     @action(detail=False, methods=['get'])
     def ouvertes(self, request):
         now = datetime.now()
         pharmacies = self.get_queryset()
-        ouvertes = [
-            p for p in pharmacies
-            if p.verifier_ouverture(now.date(), now.time())
-        ]
+        ouvertes = [p for p in pharmacies if p.verifier_ouverture(now.date(), now.time())]
         serializer = PharmacieListSerializer(ouvertes, many=True)
         return Response({'count': len(ouvertes), 'pharmacies': serializer.data})
 
-    # ─── GET /api/pharmacies/garde/ ──────────────────────────
     @action(detail=False, methods=['get'])
     def garde(self, request):
-        today  = date.today()
+        today = date.today()
         gardes = GardePharmacie.objects.filter(
             date_debut__lte=today,
             date_fin__gte=today
         ).select_related('pharmacie__delegation__gouvernorat')
-
         data = []
         for g in gardes:
             p = g.pharmacie
             data.append({
-                'id'         : str(p.id),
-                'nom'        : p.nom,
-                'adresse'    : p.adresse,
-                'telephone'  : p.telephone,
-                'latitude'   : str(p.latitude)  if p.latitude  else None,
-                'longitude'  : str(p.longitude) if p.longitude else None,
-                'delegation' : p.delegation.nom if p.delegation else None,
-                'type_garde' : g.get_type_garde_display(),
+                'id': str(p.id),
+                'nom': p.nom,
+                'adresse': p.adresse,
+                'telephone': p.telephone,
+                'latitude': str(p.latitude) if p.latitude else None,
+                'longitude': str(p.longitude) if p.longitude else None,
+                'delegation': p.delegation.nom if p.delegation else None,
+                'type_garde': g.get_type_garde_display(),
                 'heure_debut': g.heure_debut,
-                'heure_fin'  : g.heure_fin,
+                'heure_fin': g.heure_fin,
             })
         return Response({'count': len(data), 'pharmacies_garde': data})
 
-    # ─── GET /api/pharmacies/proches/?lat=&lng=&rayon= ───────
     @action(detail=False, methods=['get'])
     def proches(self, request):
-        lat   = request.query_params.get('lat')
-        lng   = request.query_params.get('lng')
+        lat = request.query_params.get('lat')
+        lng = request.query_params.get('lng')
         rayon = float(request.query_params.get('rayon', 5))
-
         if not lat or not lng:
             return Response(
                 {'erreur': 'Paramètres lat et lng requis'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-        lat, lng   = float(lat), float(lng)
-        now        = datetime.now()
+        lat, lng = float(lat), float(lng)
+        now = datetime.now()
         pharmacies = self.get_queryset()
-
         resultats = []
         for p in pharmacies:
             dist = p.distance_km(lat, lng)
             if dist <= rayon:
                 resultats.append((p, dist))
-
         resultats.sort(key=lambda x: x[1])
-
         data = []
         for p, dist in resultats[:20]:
             s = PharmacieListSerializer(p).data
             s['distance_km'] = round(dist, 2)
             s['est_ouverte'] = p.verifier_ouverture(now.date(), now.time())
             data.append(s)
-
         return Response({'count': len(data), 'pharmacies': data})
 
-    # ─── GET /api/pharmacies/{id}/statut/?date=&heure= ───────
     @action(detail=True, methods=['get'])
     def statut(self, request, pk=None):
-        pharmacie   = self.get_object()
-        date_param  = request.query_params.get('date',  str(date.today()))
+        pharmacie = self.get_object()
+        date_param = request.query_params.get('date', str(date.today()))
         heure_param = request.query_params.get('heure', datetime.now().strftime('%H:%M'))
-
-        d = datetime.strptime(date_param,  '%Y-%m-%d').date()
+        d = datetime.strptime(date_param, '%Y-%m-%d').date()
         h = datetime.strptime(heure_param, '%H:%M').time()
-
         est_ouverte = pharmacie.verifier_ouverture(d, h)
-        jour_ferie  = JourFerieTunisie.objects.filter(date=d).first()
-
+        jour_ferie = JourFerieTunisie.objects.filter(date=d).first()
         return Response({
-            'pharmacie'  : pharmacie.nom,
+            'pharmacie': pharmacie.nom,
             'est_ouverte': est_ouverte,
-            'date'       : date_param,
-            'heure'      : heure_param,
-            'jour_ferie' : jour_ferie.nom if jour_ferie else None,
+            'date': date_param,
+            'heure': heure_param,
+            'jour_ferie': jour_ferie.nom if jour_ferie else None,
         })
 
+# Ajoute ceci en dehors de toute classe (comme mes_pharmaciens)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def ma_pharmacie(request):
+    # Propriétaire en premier
+    pharmacie = Pharmacie.objects.filter(
+        proprietaire=request.user
+    ).select_related('delegation__gouvernorat').first()
+    
+    # Sinon admin/pharmacien rattaché
+    if not pharmacie:
+        pharmacie = request.user.pharmacies_travail.select_related('delegation__gouvernorat').first()
+    
+    if not pharmacie:
+        return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+    
+    return Response(PharmacieAdminSerializer(pharmacie).data)
 
-# ─── Admin ViewSet — toutes les pharmacies ────────────────────
-class PharmacieAdminViewSet(viewsets.ModelViewSet):
 
-    filter_backends    = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_class    = PharmacieFilter        # ✅ remplace filterset_fields
-    search_fields      = ['nom', 'adresse', 'telephone']
+class GardePharmacieViewSet(viewsets.ModelViewSet):
+    serializer_class = GardePharmacieSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = None
 
     def get_queryset(self):
-        return Pharmacie.objects.all().select_related(
-            'delegation__gouvernorat', 'proprietaire'
-        )
+        user = self.request.user
+        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+            qs = GardePharmacie.objects.all().select_related('pharmacie__delegation__gouvernorat').order_by('date_debut')
+            
+            gouvernorat_id = self.request.query_params.get('pharmacie__delegation__gouvernorat')
+            if gouvernorat_id:
+                qs = qs.filter(pharmacie__delegation__gouvernorat_id=gouvernorat_id)
+                
+            pharmacie_id = self.request.query_params.get('pharmacie')
+            if pharmacie_id:
+                qs = qs.filter(pharmacie_id=pharmacie_id)
+            return qs
+        
+        # Admin/propriétaire : gardes de SA pharmacie
+        pharmacie = Pharmacie.objects.filter(
+            proprietaire=user
+        ).first()
+        
+        
+        if not pharmacie:
+            pharmacie = user.pharmacies_travail.first()
+        if not pharmacie:
+            return GardePharmacie.objects.none()
+        return GardePharmacie.objects.filter(
+            pharmacie=pharmacie
+        ).order_by('date_debut')
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        # Superadmin : pharmacie fournie dans le payload
+        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+            serializer.save()
+            return
+        # Admin/propriétaire : on résout la pharmacie automatiquement
+        pharmacie = Pharmacie.objects.filter(
+            proprietaire=user,
+            est_active=True
+        ).first()
+        if not pharmacie:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError('Aucune pharmacie associée à votre compte.')
+        serializer.save(pharmacie=pharmacie)
+        
+class PharmacieAdminSerializer(serializers.ModelSerializer):
+    delegation   = DelegationSerializer(read_only=True)
+    proprietaire = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = Pharmacie
+        fields = [
+            'id', 'nom', 'adresse', 'telephone', 'email',
+            'categorie', 'est_active', 'created_at',
+            'delegation', 'proprietaire',
+        ]
+
+    def get_proprietaire(self, obj):
+        p = obj.proprietaire
+        if not p:
+            return None
+        return {
+            'first_name': getattr(p, 'first_name', '') or '',
+            'last_name' : getattr(p, 'last_name',  '') or '',
+            'email'     : getattr(p, 'email',       '') or '',
+            'telephone' : getattr(p, 'telephone',   None),
+        }
+        
+class PharmacieAdminViewSet(viewsets.ModelViewSet):
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_class = PharmacieFilter
+    search_fields = ['nom', 'adresse', 'telephone']
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+            return Pharmacie.objects.all().select_related(
+                'delegation__gouvernorat')
+        return Pharmacie.objects.filter(
+            proprietaire=user
+            ).select_related('delegation__gouvernorat')
 
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
@@ -153,15 +230,52 @@ class PharmacieAdminViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         return [IsAuthenticated()]
-    
+
+    def _est_admin(self, user):
+        return (
+            user.is_staff or
+            user.is_superuser or
+            user.roles.filter(name='administrateur').exists()
+        )
+
     def perform_create(self, serializer):
-        pharmacie = serializer.save(proprietaire=self.request.user)
+        user = self.request.user
+        nb_pharmacies = Pharmacie.objects.filter(proprietaire=user).count()
+        if nb_pharmacies >= 1:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError(
+                "Vous avez déjà une pharmacie enregistrée. "
+                "Un utilisateur ne peut en posséder qu'une seule."
+            )
+        pharmacie = serializer.save(proprietaire=user)
         self._generer_horaires(pharmacie)
-        
-        
+
+    def perform_update(self, serializer):
+        pharmacie = self.get_object()
+        user = self.request.user
+
+        # Vérification des droits
+        if not self._est_admin(user) and str(pharmacie.proprietaire_id) != str(user.id):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Vous ne pouvez modifier que votre propre pharmacie.")
+
+        ancienne_cat = pharmacie.categorie
+        pharmacie_maj = serializer.save()
+
+        if ancienne_cat != pharmacie_maj.categorie:
+            pharmacie_maj.horaires_travail.all().delete()
+            self._generer_horaires(pharmacie_maj)
+
+    def perform_destroy(self, instance):
+        user = self.request.user
+        if not (user.is_superuser or user.roles.filter(name='superadmin').exists()) and str(instance.proprietaire_id) != str(user.id):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Vous ne pouvez supprimer que votre propre pharmacie.")
+        instance.delete()
+
     def _generer_horaires(self, pharmacie):
         aujourd_hui = date.today()
-        en_ramadan  = PeriodeRamadan.objects.filter(
+        en_ramadan = PeriodeRamadan.objects.filter(
             date_debut__lte=aujourd_hui,
             date_fin__gte=aujourd_hui
         ).exists()
@@ -193,8 +307,8 @@ class PharmacieAdminViewSet(viewsets.ModelViewSet):
                         'jour': j, 'est_ouvert': True,
                         'heure_ouverture': time(8, 30),
                         'heure_fermeture': time(19, 30),
-                        'pause_debut':     time(13, 0),
-                        'pause_fin':       time(15, 0),
+                        'pause_debut': time(13, 0),
+                        'pause_fin': time(15, 0),
                     } for j in range(5)],
                     {
                         'jour': 5, 'est_ouvert': True,
@@ -220,43 +334,261 @@ class PharmacieAdminViewSet(viewsets.ModelViewSet):
             HoraireTravail.objects.get_or_create(
                 pharmacie=pharmacie, jour=h['jour'], defaults=h
             )
-    def perform_update(self, serializer):
-        pharmacie = self.get_object()
-        user      = self.request.user
-        if not user.is_staff and str(pharmacie.proprietaire_id) != str(user.id):
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("Vous ne pouvez modifier que votre propre pharmacie.")
-        serializer.save()
 
-    def perform_destroy(self, instance):
-        user = self.request.user
-        if not user.is_staff and str(instance.proprietaire_id) != str(user.id):
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("Vous ne pouvez supprimer que votre propre pharmacie.")
-        instance.delete()
-
-    # ─── PATCH /api/admin/pharmacies/{id}/toggle_active/ ─────
     @action(detail=True, methods=['patch'])
     def toggle_active(self, request, pk=None):
-        pharmacie            = self.get_object()
+        pharmacie = self.get_object()
         pharmacie.est_active = not pharmacie.est_active
         pharmacie.save()
         return Response({
-            'message'   : f"Pharmacie {'activée' if pharmacie.est_active else 'désactivée'}.",
+            'message': f"Pharmacie {'activée' if pharmacie.est_active else 'désactivée'}.",
             'est_active': pharmacie.est_active,
         })
-        
+
+    @action(detail=False, methods=['get'], url_path='peut-creer')
+    def peut_creer(self, request):
+        nb = Pharmacie.objects.filter(proprietaire=request.user).count()
+        if nb >= 1:
+            return Response({
+                'peut_creer': False,
+                'raison': "Vous avez déjà une pharmacie enregistrée. "
+                          "Un utilisateur ne peut en posséder qu'une seule."
+            })
+        return Response({'peut_creer': True, 'raison': None})
+
+# ──────────────────────────────────────────────────────────
+# PHARMACIENS DANS UNE PHARMACIE (admin uniquement)
+# ──────────────────────────────────────────────────────────
+
+# pharmacies/views.py — remplacer mes_pharmaciens et ajouter un endpoint admin dédié
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def mes_pharmaciens(request):
+    if not is_admin(request.user):
+        return Response({'detail': 'Accès réservé aux administrateurs.'}, status=403)
+    
+    pharmacie = get_pharmacie_admin(request.user)
+    if not pharmacie:
+        return Response({'pharmacie_nom': '', 'pharmaciens': []})
+
+    pharmaciens = User.objects.filter(
+        roles__name='pharmacien',
+        pharmacies_travail=pharmacie
+    ).distinct()
+
+    data = [
+        {
+            'id'       : str(u.id),
+            'nom'      : f"{u.first_name} {u.last_name}".strip() or u.email,
+            'email'    : u.email,
+            'telephone': getattr(u, 'telephone', '') or '',
+            'est_actif': u.is_active,
+        }
+        for u in pharmaciens
+    ]
+    return Response({'pharmacie_nom': pharmacie.nom, 'pharmaciens': data})
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def ajouter_pharmacien(request):
+    if not is_admin(request.user):
+        return Response({'detail': 'Accès réservé aux administrateurs.'}, status=403)
+
+    pharmacie = get_pharmacie_admin(request.user)
+    if not pharmacie:
+        return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+
+    first_name = request.data.get('first_name', '').strip()
+    last_name  = request.data.get('last_name',  '').strip()
+    email      = request.data.get('email',      '').strip().lower()
+
+    if not first_name or not last_name or not email:
+        return Response(
+            {'detail': 'Les champs first_name, last_name et email sont obligatoires.'},
+            status=400
+        )
+
+    if User.objects.filter(email=email).exists():
+        return Response({'email': ['Un compte avec cet email existe déjà.']}, status=400)
+
+    import secrets, string
+    password = ''.join(
+        secrets.choice(string.ascii_letters + string.digits + '!@#$%^&*')
+        for _ in range(14)
+    )
+
+    # ✅ Sans username
+    user = User.objects.create_user(
+        email      = email,
+        first_name = first_name,
+        last_name  = last_name,
+        password   = password,
+        is_active  = True,
+    )
+
+    role_pharmacien, _ = Role.objects.get_or_create(name='pharmacien')
+    user.roles.add(role_pharmacien)
+
+    # ✅ pharmacies_travail au lieu de pharmacies
+    user.pharmacies_travail.add(pharmacie)
+
+    _send_credentials_email(user, password)
+
+    return Response(
+        {
+            'detail'    : f'Compte créé pour {email}.',
+            'email'     : email,
+            'first_name': first_name,
+            'last_name' : last_name,
+        },
+        status=201
+    )
+# ──────────────────────────────────────────────────────────
+# DEMANDES DE SUSPENSION
+# ──────────────────────────────────────────────────────────
+
+def _send_credentials_email(user, password):
+    from django.core.mail import send_mail
+    from django.conf import settings
+    try:
+        send_mail(
+            subject     = 'Vos identifiants de connexion – Pharma Platform',
+            message     = (
+                f'Bonjour {user.get_full_name()},\n\n'
+                f'Votre compte pharmacien a été créé.\n'
+                f'Email    : {user.email}\n'
+                f'Mot de passe : {password}\n\n'
+                f'Veuillez changer votre mot de passe après votre première connexion.\n'
+            ),
+            from_email  = settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+            fail_silently=True,
+        )
+    except Exception:
+        pass
+class DemandesSuspensionViewSet(viewsets.ModelViewSet):
+    serializer_class   = DemandesSuspensionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        print("user connecté :", user.email)
+        # Superadmin voit tout ; admin ne voit que les siennes
+        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+            return DemandesSuspension.objects.all()
+        return DemandesSuspension.objects.filter(demandeur=user)
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+            serializer.save(demandeur=user)
+            return
+        pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
+        if not pharmacie:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError('Vous ne possédez aucune pharmacie.')
+        serializer.save(demandeur=self.request.user, pharmacie=pharmacie)
+
+    @action(detail=True, methods=['patch'], url_path='traiter')
+    def traiter(self, request, pk=None):
+        """Superadmin approuve ou refuse la demande."""
+        from django.utils import timezone
+        if not (request.user.is_superuser or
+                request.user.roles.filter(name='superadmin').exists()):
+            return Response({'detail': 'Accès refusé.'}, status=403)
+
+        demande = self.get_object()
+        nouveau_statut = request.data.get('statut')   # 'approuvee' | 'refusee'
+        commentaire    = request.data.get('commentaire', '')
+
+        if nouveau_statut not in ('approuvee', 'refusee'):
+            return Response({'detail': "statut doit être 'approuvee' ou 'refusee'."}, status=400)
+
+        demande.statut                  = nouveau_statut
+        demande.commentaire_superadmin  = commentaire
+        demande.traite_par              = request.user
+        demande.date_traitement         = timezone.now()
+        demande.save()
+
+        # Si approuvée → mettre la pharmacie en suspension (inactive)
+        if nouveau_statut == 'approuvee':
+            demande.pharmacie.est_active = False
+            demande.pharmacie.save()
+
+        return Response(DemandesSuspensionSerializer(demande).data)
+    
+    
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def mes_citoyens(request):
+    if not is_admin(request.user):
+        return Response({'pharmacie_nom': '', 'citoyens': []})
+
+    pharmacie = get_pharmacie_admin(request.user)
+    if not pharmacie:
+        return Response({'pharmacie_nom': '', 'citoyens': []})
+
+    from reservations.models import Reservation
+    from django.db.models import Count, Max
+
+    # Check your Reservation model for the actual timestamp field name
+    # Common names: created_at, date_creation, date_commande, created
+    DATE_FIELD = 'created_at'  # ← change this if needed
+
+    try:
+        qs = (
+            Reservation.objects
+            .filter(stock__pharmacie=pharmacie)
+            .values('citoyen')
+            .annotate(
+                total_commandes=Count('id'),
+                derniere_visite=Max(DATE_FIELD),
+            )
+        )
+        # Force evaluation to catch field errors early
+        qs = list(qs)
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
+
+    citoyen_ids = [row['citoyen'] for row in qs]
+    citoyens_map = {u.id: u for u in User.objects.filter(id__in=citoyen_ids)}
+
+    data = [
+        {
+            'id'             : str(row['citoyen']),
+            'nom' : f"{citoyens_map[row['citoyen']].first_name} {citoyens_map[row['citoyen']].last_name}".strip() or citoyens_map[row['citoyen']].email,
+            'email'          : citoyens_map[row['citoyen']].email,
+            'total_commandes': row['total_commandes'],
+            'derniere_visite': row['derniere_visite'],
+        }
+        for row in qs
+        if row['citoyen'] in citoyens_map
+    ]
+
+    return Response({'pharmacie_nom': pharmacie.nom, 'citoyens': data})
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def mes_gardes(request):
-    """Gardes de la pharmacie du pharmacien connecté."""
+    # 1. Propriétaire direct
     pharmacie = Pharmacie.objects.filter(
-        proprietaire=request.user,
-        est_active=True
+        proprietaire=request.user
     ).first()
 
+    # 2. Pharmacien rattaché (pharmacies_travail)
     if not pharmacie:
-        return Response({'detail': 'Aucune pharmacie associée.'}, status=404)
+        pharmacie = request.user.pharmacies_travail.first()
+
+    # 3. Admin avec rôle 'administrateur' (sans être propriétaire)
+    if not pharmacie and is_admin(request.user):
+        pharmacie = get_pharmacie_admin(request.user)
+
+    if not pharmacie:
+        return Response(
+            {'detail': 'Aucune pharmacie associée.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
 
     gardes = GardePharmacie.objects.filter(
         pharmacie=pharmacie
@@ -265,12 +597,11 @@ def mes_gardes(request):
     serializer = MesGardesSerializer(gardes, many=True)
     return Response({
         'pharmacie_nom': pharmacie.nom,
-        'categorie':     pharmacie.categorie,
-        'gardes':        serializer.data,
+        'categorie': pharmacie.categorie,
+        'gardes': serializer.data,
     })
 
 
-# ─── GET /api/jours-feries/?annee= ───────────────────────────
 @api_view(['GET'])
 def jours_feries_annee(request):
     annee = request.query_params.get('annee', date.today().year)
@@ -279,54 +610,156 @@ def jours_feries_annee(request):
     return Response(serializer.data)
 
 
-# ─── GET /api/ramadan/ ────────────────────────────────────────
 @api_view(['GET'])
 def periodes_ramadan(request):
-    periodes   = PeriodeRamadan.objects.all().order_by('-annee')
+    periodes = PeriodeRamadan.objects.all().order_by('-annee')
     serializer = PeriodeRamadanSerializer(periodes, many=True)
     return Response(serializer.data)
 
 
-# ─── Stats dashboard ──────────────────────────────────────────
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def dashboard_stats(request):
     from django.utils import timezone
     from accounts.models import User
-
-    now        = timezone.now()
+    now = timezone.now()
     this_month = now.replace(day=1)
-
     return Response({
-        'total_utilisateurs'  : User.objects.count(),
-        'nouveaux_ce_mois'    : User.objects.filter(date_joined__gte=this_month).count(),
-        'comptes_en_attente'  : User.objects.filter(is_active=False).count(),
-        'pharmacies_actives'  : Pharmacie.objects.filter(est_active=True).count(),
+        'total_utilisateurs': User.objects.count(),
+        'nouveaux_ce_mois': User.objects.filter(date_joined__gte=this_month).count(),
+        'comptes_en_attente': User.objects.filter(is_active=False).count(),
+        'pharmacies_actives': Pharmacie.objects.filter(est_active=True).count(),
         'pharmacies_inactives': Pharmacie.objects.filter(est_active=False).count(),
-        'nouvelles_ce_mois'   : Pharmacie.objects.filter(created_at__gte=this_month).count(),
-        'gardes_ce_mois'      : GardePharmacie.objects.filter(
+        'nouvelles_ce_mois': Pharmacie.objects.filter(created_at__gte=this_month).count(),
+        'gardes_ce_mois': GardePharmacie.objects.filter(
             date_debut__year=now.year,
             date_fin__month=now.month,
         ).count(),
         'roles': {
-            'citoyens'       : User.objects.filter(roles__name='citoyen').count(),
-            'pharmaciens'    : User.objects.filter(roles__name='pharmacien').count(),
+            'citoyens': User.objects.filter(roles__name='citoyen').count(),
+            'pharmaciens': User.objects.filter(roles__name='pharmacien').count(),
             'administrateurs': User.objects.filter(roles__name='administrateur').count(),
         }
     })
+    
+# ─────────────────────────────────────────────────────────
+# GET /api/pharmacies/historique-citoyen/{citoyen_id}/
+# ─────────────────────────────────────────────────────────
+ 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def historique_citoyen(request, citoyen_id):
+    if not is_admin(request.user):
+        return Response({'detail': 'Accès réservé aux administrateurs.'}, status=403)
+
+    pharmacie = get_pharmacie_admin(request.user)
+    if not pharmacie:
+        return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+
+    try:
+        citoyen = User.objects.get(pk=citoyen_id)
+    except User.DoesNotExist:
+        return Response({'detail': 'Citoyen introuvable.'}, status=404)
+
+    from reservations.models import Reservation
+
+    reservations = (
+        Reservation.objects
+        .filter(stock__pharmacie=pharmacie, citoyen=citoyen)
+        .select_related('medicament', 'stock')
+        .order_by('-created_at')
+    )
+
+    historique = [
+        {
+            'id'            : str(r.id),
+            'medicament_nom': r.medicament.nom,
+            'quantite'      : r.quantite,
+            'statut'        : r.statut,
+            'date_achat'    : r.created_at,
+        }
+        for r in reservations
+    ]
+
+    return Response({
+        'citoyen_nom': f"{citoyen.first_name} {citoyen.last_name}".strip() or citoyen.email,
+        'historique' : historique,
+    })
+    
 
 
-# ─── CRUD Jours fériés (admin) ────────────────────────────────
 class JourFerieViewSet(viewsets.ModelViewSet):
-    queryset           = JourFerieTunisie.objects.all().order_by('date')
-    serializer_class   = JourFerieSerializer
+    queryset = JourFerieTunisie.objects.all().order_by('date')
+    serializer_class = JourFerieSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends    = [DjangoFilterBackend]
-    filterset_fields   = ['date__year', 'type_ferie']
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['date__year', 'type_ferie']
 
 
-# ─── CRUD Période Ramadan (admin) ─────────────────────────────
 class PeriodeRamadanViewSet(viewsets.ModelViewSet):
-    queryset           = PeriodeRamadan.objects.all().order_by('-annee')
-    serializer_class   = PeriodeRamadanSerializer
+    queryset = PeriodeRamadan.objects.all().order_by('-annee')
+    serializer_class = PeriodeRamadanSerializer
     permission_classes = [IsAuthenticated]
+    
+class SuperAdminPharmacieViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Endpoint exclusif superadmin :
+    - Lister TOUTES les pharmacies avec leurs détails
+    - Voir les horaires, gardes, propriétaire
+    """
+    serializer_class   = PharmacieDetailSerializer
+    permission_classes = [IsSuperAdmin]
+    pagination_class  = None  # Désactive la pagination pour voir tout d'un coup
+
+    def get_queryset(self):
+        return Pharmacie.objects.all().select_related(
+            'delegation__gouvernorat', 'proprietaire'
+        ).prefetch_related(
+            'horaires', 'horaires_ramadan', 'gardes'
+        )
+        
+def get_pharmacie_admin(user):
+    """Retourne la pharmacie du user connecté ou None."""
+    return Pharmacie.objects.filter(proprietaire=user).select_related(
+        'delegation__gouvernorat'
+    ).first()
+ 
+ 
+def is_admin(user):
+    return (
+        user.is_staff
+        or user.is_superuser
+        or user.roles.filter(name__in=['administrateur', 'superadmin']).exists()
+    )
+ 
+class HoraireViewSet(viewsets.ModelViewSet):
+    serializer_class = HoraireTravailSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['pharmacie', 'pharmacie__delegation__gouvernorat']
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+            return HoraireTravail.objects.all().select_related('pharmacie__delegation__gouvernorat')
+        pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
+        if not pharmacie:
+            return HoraireTravail.objects.none()
+        return HoraireTravail.objects.filter(pharmacie=pharmacie)
+
+
+class HoraireRamadanViewSet(viewsets.ModelViewSet):
+    serializer_class = HoraireRamadanSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['pharmacie', 'pharmacie__delegation__gouvernorat']
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+            return HoraireRamadan.objects.all().select_related('pharmacie__delegation__gouvernorat')
+        pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
+        if not pharmacie:
+            return HoraireRamadan.objects.none()
+        return HoraireRamadan.objects.filter(pharmacie=pharmacie)
+        

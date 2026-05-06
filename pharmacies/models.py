@@ -34,7 +34,7 @@ class Pharmacie(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True, blank=True,
-        related_name='pharmacies'
+        related_name='pharmacies',
     )
     created_at   = models.DateTimeField(auto_now_add=True)
     updated_at   = models.DateTimeField(auto_now=True)
@@ -45,59 +45,69 @@ class Pharmacie(models.Model):
     def verifier_ouverture(self, date, heure):
         from datetime import time
 
-        # ── 1. Pharmacie catégorie B → ouverte la nuit ────────
+        # ── 1. Cat B — Nuit (traverse minuit) ─────────────────────────────
+        # Ouverte de 19h30 jusqu'à (mais pas inclus) 08h30 le lendemain
         if self.categorie == 'B':
-            # Nuit = après 19h30 OU avant 8h30 (traverse minuit)
-            return heure >= time(19, 30) or heure <= time(8, 30)
+            return heure >= time(19, 30) or heure < time(8, 30)
 
-        # ── 2. Jour férié → ouverte seulement si de garde ─────
+        # ── 2. Jour Férié ──────────────────────────────────────────────────
+        # Cat A normale → fermée
+        # Cat A de garde → ouverte 08h30→19h30
         jour_ferie = JourFerieTunisie.objects.filter(date=date).first()
         if jour_ferie:
-            return GardePharmacie.objects.filter(
+            en_garde = GardePharmacie.objects.filter(
                 pharmacie=self,
                 date_debut__lte=date,
                 date_fin__gte=date
             ).exists()
+            if not en_garde:
+                return False
+            return time(8, 30) <= heure <= time(19, 30)
 
-        # ── 3. Dimanche → ouverte seulement si de garde ───────
+        # ── 3. Dimanche ────────────────────────────────────────────────────
+        # Cat A normale → fermée
+        # Cat A de garde → ouverte 08h30→19h30
         if date.weekday() == 6:
-            return GardePharmacie.objects.filter(
+            en_garde = GardePharmacie.objects.filter(
                 pharmacie=self,
                 date_debut__lte=date,
                 date_fin__gte=date
             ).exists()
+            if not en_garde:
+                return False
+            return time(8, 30) <= heure <= time(19, 30)
 
-        # ── 4. De garde en semaine → continu 8h30→19h30 ───────
-        garde = GardePharmacie.objects.filter(
+        # ── 4. De garde Lun→Sam ────────────────────────────────────────────
+        # Garde = continu 08h30→19h30 sans pause (même en Ramadan)
+        en_garde = GardePharmacie.objects.filter(
             pharmacie=self,
             date_debut__lte=date,
             date_fin__gte=date
-        ).first()
-        if garde:
+        ).exists()
+        if en_garde:
             return time(8, 30) <= heure <= time(19, 30)
 
-        # ── 5. Période Ramadan ─────────────────────────────────
+        # ── 5. Période Ramadan ─────────────────────────────────────────────
         periode_ramadan = PeriodeRamadan.objects.filter(
             date_debut__lte=date,
             date_fin__gte=date
         ).first()
 
-        jour_semaine = date.weekday()
-
         if periode_ramadan:
+            jour_semaine = date.weekday()
             horaire = HoraireRamadan.objects.filter(
                 pharmacie=self,
                 jour=jour_semaine
             ).first()
 
-            # Pas d'horaire Ramadan en base → fallback CNOPT officiel
+            # Pas d'horaire Ramadan personnalisé → fallback CNOPT officiel
             if not horaire:
-                if jour_semaine == 6:           # Dimanche → fermé
-                    return False
-                if jour_semaine == 5:           # Samedi → 08h30→13h00
+                if jour_semaine == 5:   # Samedi → 08h30→13h00
                     return time(8, 30) <= heure <= time(13, 0)
-                # Lundi→Vendredi → 08h30→17h00
-                return time(8, 30) <= heure <= time(17, 0)
+                # Lun→Ven → même horaire que normal (pas 17h00 !)
+                matin      = time(8, 30) <= heure <= time(13, 0)
+                apres_midi = time(15, 0) <= heure <= time(19, 30)
+                return matin or apres_midi
 
             if not horaire.est_ouvert:
                 return False
@@ -108,7 +118,7 @@ class Pharmacie(models.Model):
                 horaire.heure_fermeture_1 is not None and
                 horaire.heure_ouverture_1 <= heure <= horaire.heure_fermeture_1
             )
-            # Tranche 2 (soir) — optionnelle
+            # Tranche 2 (soir — après iftar, optionnelle)
             tranche2 = (
                 horaire.heure_ouverture_2 is not None and
                 horaire.heure_fermeture_2 is not None and
@@ -116,15 +126,31 @@ class Pharmacie(models.Model):
             )
             return bool(tranche1 or tranche2)
 
-        # ── 6. Horaire normal catégorie A ──────────────────────
-        # Samedi → matin seulement
-        if jour_semaine == 5:
-            return time(8, 30) <= heure <= time(13, 0)
+        # ── 6. Horaire normal Cat A ────────────────────────────────────────
+        jour_semaine = date.weekday()
+        horaire = HoraireTravail.objects.filter(
+            pharmacie=self,
+            jour=jour_semaine
+        ).first()
+        
+        if not horaire :
+            if jour_semaine == 5:
+                return time(8, 30) <= heure <= time(13, 0)
+            matin      = time(8, 30) <= heure <= time(13, 0)
+            apres_midi = time(15, 0) <= heure <= time(19, 30)
+            return matin or apres_midi
+        if not horaire.est_ouvert:
+            return False
+        if not horaire.heure_ouverture or not horaire.heure_fermeture:
+            return False
+        
+        if horaire.pause_debut and horaire.pause_fin:
+            # Avec pause déjeuner
+            matin = horaire.heure_ouverture <= heure < horaire.pause_debut
+            apres_midi = horaire.pause_fin <= heure < horaire.heure_fermeture
+            return matin or apres_midi
+        return horaire.heure_ouverture <= heure < horaire.heure_fermeture
 
-        # Lundi→Vendredi : matin + après-midi (avec pause déjeuner)
-        matin      = time(8, 30) <= heure <= time(13, 0)
-        apres_midi = time(15, 0) <= heure <= time(19, 30)
-        return matin or apres_midi
 
     def distance_km(self, lat, lng):
         if not self.latitude or not self.longitude:
@@ -140,6 +166,13 @@ class Pharmacie(models.Model):
 
     class Meta:
         ordering = ['nom']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['proprietaire'],
+                condition=models.Q(proprietaire__isnull=False),
+                name='unique_proprietaire_pharmacie'
+            )
+        ]
 
 
 class HoraireTravail(models.Model):
@@ -166,7 +199,7 @@ class HoraireRamadan(models.Model):
     est_ouvert        = models.BooleanField(default=True)
     heure_ouverture_1 = models.TimeField(null=True, blank=True)
     heure_fermeture_1 = models.TimeField(null=True, blank=True)
-    heure_ouverture_2 = models.TimeField(null=True, blank=True)   # optionnel (ex: soir après iftar)
+    heure_ouverture_2 = models.TimeField(null=True, blank=True)
     heure_fermeture_2 = models.TimeField(null=True, blank=True)
 
     class Meta:
@@ -231,3 +264,25 @@ class GardePharmacie(models.Model):
 
     class Meta:
         ordering = ['date_debut']
+
+
+class DemandesSuspension(models.Model):
+    STATUT_CHOICES = [
+        ('en_attente', 'En attente'),
+        ('approuvee', 'Approuvée'),
+        ('refusee', 'Refusée'),
+    ]
+    pharmacie              = models.ForeignKey(Pharmacie, on_delete=models.CASCADE, related_name='demandes_suspension')
+    demandeur              = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    motif                  = models.TextField()
+    statut                 = models.CharField(max_length=20, choices=STATUT_CHOICES, default='en_attente')
+    date_demande           = models.DateTimeField(auto_now_add=True)
+    date_traitement        = models.DateTimeField(null=True, blank=True)
+    traite_par             = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='demandes_traitees'
+    )
+    commentaire_superadmin = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-date_demande']

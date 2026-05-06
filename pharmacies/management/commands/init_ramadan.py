@@ -30,3 +30,4 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f'\n Ramadan : {created_count} créés, {existing_count} déjà existants'
         ))
+        

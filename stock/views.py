@@ -5,176 +5,521 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
-from django.db.models import F
+from django.db.models import F, IntegerField
 from datetime import date, timedelta
+import logging
 
-from .models import Medicament, Categorie, MouvementStock, StockPharmacie, Vente
+from .models import (
+    Medicament,
+    Categorie,
+    MouvementStock,
+    Notification,
+    StockPharmacie,
+    Vente,
+    ATC,
+)
 from .serializers import (
-    MedicamentSerializer, CategorieSerializer,
-    MouvementStockSerializer, StockPharmacieSerializer,
+    MedicamentSerializer,
+    CategorieSerializer,
+    MouvementStockSerializer,
+    StockPharmacieSerializer,
     VenteSerializer,
+    NotificationSerializer,
+    ATCSerializer,
 )
 from .permissions import IsAdminRole
+
+logger = logging.getLogger(__name__)
+
+
+# ── Helper global ─────────────────────────────────────────────────────────────
+
+
+def get_pharmacie_user(user):
+    from pharmacies.models import Pharmacie
+
+    # Cas 1 : propriétaire/admin
+    pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
+    if pharmacie:
+        return pharmacie
+
+    # Cas 2 : pharmacien employé
+    pharmacie = user.pharmacies_travail.first()
+
+    if pharmacie:
+        return pharmacie
+
+    return None
 
 
 # ── Catégories ────────────────────────────────────────────────────────────────
 
+
 class CategorieViewSet(viewsets.ModelViewSet):
-    queryset           = Categorie.objects.all()
-    serializer_class   = CategorieSerializer
+    queryset = Categorie.objects.all()
+    serializer_class = CategorieSerializer
     permission_classes = [IsAuthenticated]
 
 
 # ── Médicaments ───────────────────────────────────────────────────────────────
 
+
 class MedicamentViewSet(viewsets.ModelViewSet):
-    queryset           = Medicament.objects.select_related('categorie').all()
-    serializer_class   = MedicamentSerializer
+    serializer_class = MedicamentSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends    = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields   = ['categorie', 'ordonnance_requise']
-    search_fields      = ['nom', 'dci']
-    ordering_fields    = ['nom', 'prix_vente', 'date_expiration', 'quantite_stock']
+    pagination_class = None
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ["categorie", "ordonnance_requise"]
+    search_fields = ["nom", "dci"]
+    ordering_fields = ["nom", "prix_vente", "date_expiration", "quantite_stock"]
 
-    @action(detail=False, methods=['get'], url_path='expirent-bientot')
+    def _est_admin(self) -> bool:
+        return IsAdminRole.est_admin(self.request.user)
+
+    def get_queryset(self):
+        """
+        ✅ CORRIGÉ : filtre les médicaments selon la pharmacie de l'user
+        """
+        from django.db.models import OuterRef, Subquery, IntegerField
+        base_qs = Medicament.objects.select_related("categorie").all()
+
+        if self._est_admin():
+            pharmacie = get_pharmacie_user(self.request.user)
+            if not pharmacie:
+                return base_qs
+            
+        else: 
+            pharmacie = get_pharmacie_user(self.request.user)
+            if not pharmacie:
+                return base_qs.none()
+
+        stock_qs = StockPharmacie.objects.filter(
+            pharmacie=pharmacie,
+            medicament=OuterRef("pk")
+        ).values("quantite_stock")[:1]
+        
+        return base_qs.filter(
+            stocks__pharmacie=pharmacie
+        ).annotate(
+            quantite_stock_reel=Subquery(stock_qs, output_field=IntegerField())
+        ).distinct()
+        
+        
+    @action(detail=False, methods=["get"], url_path="expirent-bientot")
     def expirent_bientot(self, request):
-        qs = Medicament.objects.filter(
+        qs = self.get_queryset().filter(
             date_expiration__lte=date.today() + timedelta(days=30)
-        ).select_related('categorie')
+        )
         return Response(MedicamentSerializer(qs, many=True).data)
 
-    @action(detail=False, methods=['get'], url_path='stock-faible')
+    @action(detail=False, methods=["get"], url_path="stock-faible")
     def stock_faible(self, request):
-        qs = Medicament.objects.filter(
-            quantite_stock__lte=F('seuil_alerte')
-        ).select_related('categorie')
+        qs = self.get_queryset().filter(quantite_stock__lte=F("seuil_alerte"))
         return Response(MedicamentSerializer(qs, many=True).data)
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        stock = serializer.validated_data.get("stock")
+        # ✅ CORRIGÉ : utilise le helper
+        pharmacie = get_pharmacie_user(user)
+
+        if not self._est_admin() and not pharmacie:
+            raise PermissionDenied("Aucune pharmacie associée à votre compte.")
+
+        medicament = serializer.save()
+
+        if pharmacie:
+            stock, created = StockPharmacie.objects.get_or_create(
+                pharmacie=pharmacie,
+                medicament=medicament,
+                defaults={
+                    "quantite_stock": medicament.quantite_stock,
+                    "seuil_alerte": medicament.seuil_alerte,
+                    "prix_vente": medicament.prix_vente,
+                },
+            )
+            from .sms_service import verifier_et_notifier_stock
+
+            verifier_et_notifier_stock(stock)
+
+    def perform_update(self, serializer):
+        nouvelle_quantite = self.request.data.get("quantite_stock")
+        medicament = serializer.save()
+        pharmacie = get_pharmacie_user(self.request.user)
+        
+        if pharmacie:
+            update_data = {
+                'prix_vente'  : medicament.prix_vente,
+                'seuil_alerte': medicament.seuil_alerte,
+            }
+            if nouvelle_quantite is not None:
+                update_data['quantite_stock'] = int(nouvelle_quantite)
+                
+                medicament.quantite_stock = int(nouvelle_quantite)
+                medicament.save(update_fields=['quantite_stock'])
+
+            stock_qs = StockPharmacie.objects.filter(
+                pharmacie=pharmacie,
+                medicament=medicament,
+            )
+            stock_qs.update(**update_data)
+            stock = stock_qs.select_related(
+                "pharmacie__proprietaire", "medicament"
+            ).first()
+            if stock:
+                from .sms_service import verifier_et_notifier_stock
+                verifier_et_notifier_stock(stock)
 
 
 # ── Stock par pharmacie ───────────────────────────────────────────────────────
 
+
 class StockPharmacieViewSet(viewsets.ModelViewSet):
-    serializer_class   = StockPharmacieSerializer
+    serializer_class = StockPharmacieSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends    = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields   = ['pharmacie', 'medicament', 'medicament__categorie']
-    search_fields      = ['medicament__nom', 'medicament__dci']
-    ordering_fields    = ['quantite_stock', 'seuil_alerte', 'medicament__nom']
+
+    pagination_class = None  # désactive pagination pour les listes complètes
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ["pharmacie", "medicament", "medicament__categorie"]
+    search_fields = ["medicament__nom", "medicament__dci"]
+    ordering_fields = ["medicament__nom"]
 
     def _est_admin(self) -> bool:
         return IsAdminRole.est_admin(self.request.user)
 
     def get_queryset(self):
         base_qs = StockPharmacie.objects.select_related(
-            'pharmacie', 'medicament', 'medicament__categorie'
+            "pharmacie", "medicament", "medicament__categorie"
         )
+        user = self.request.user
+        # superadmin
+        if user.is_superuser or user.roles.filter(name="superadmin").exists():
+            return base_qs.all()
+
         if self._est_admin():
             return base_qs.all()
-        return base_qs.filter(pharmacie__proprietaire=self.request.user)
 
-    @action(detail=False, methods=['get'], url_path='alertes')
+        pharmacie = get_pharmacie_user(self.request.user)
+        if pharmacie:
+            return base_qs.filter(pharmacie=pharmacie)
+        return base_qs.none()
+
+    @action(detail=False, methods=["get"], url_path="alertes")
     def alertes(self, request):
-        qs             = self.get_queryset()
-        stock_faible   = qs.filter(quantite_stock__lte=F('seuil_alerte'))
-        date_limite    = date.today() + timedelta(days=30)
-        expire_bientot = qs.filter(medicament__date_expiration__lte=date_limite)
-        return Response({
-            'stock_faible'   : StockPharmacieSerializer(stock_faible,   many=True).data,
-            'expire_bientot' : StockPharmacieSerializer(expire_bientot, many=True).data,
-        })
+        try:
+            qs = self.get_queryset()
 
-    @action(detail=True, methods=['get'], url_path='historique')
+            # Filtre par pharmacie
+            pharmacie_id = request.query_params.get("pharmacie")
+            if pharmacie_id:
+                qs = qs.filter(pharmacie_id=pharmacie_id)
+
+            # filter par med
+            search = request.query_params.get("search", "")
+            if search:
+                qs = qs.filter(medicament__nom__icontains=search) | qs.filter(
+                    medicament__dci__icontains=search
+                )
+
+            stock_faible = qs.filter(quantite_stock__lte=F("seuil_alerte"))
+            date_limite = date.today() + timedelta(days=30)
+            expire_bientot = qs.filter(medicament__date_expiration__lte=date_limite)
+            rupture_stock = qs.filter(quantite_stock=0)
+
+            return Response(
+                {
+                    "stock_faible": StockPharmacieSerializer(
+                        stock_faible, many=True
+                    ).data,
+                    "expire_bientot": StockPharmacieSerializer(
+                        expire_bientot, many=True
+                    ).data,
+                    "rupture_stock": StockPharmacieSerializer(
+                        rupture_stock, many=True
+                    ).data,
+                    "stats": {
+                        "total_produits": qs.count(),
+                        "stock_faible": stock_faible.count(),
+                        "expire_bientot": expire_bientot.count(),
+                        "rupture_stock": rupture_stock.count(),
+                    },
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"Erreur alertes: {e}", exc_info=True)
+            return Response(
+                {
+                    "stock_faible": [],
+                    "expire_bientot": [],
+                    "rupture_stock": [],
+                    "status": {
+                        "total_produits": 0,
+                        "stock_faible": 0,
+                        "expire_bientot": 0,
+                        "rupture_stock": 0,
+                    },
+                    "error": "Une erreur est survenue lors de la récupération des alertes.",
+                }
+            )
+
+    @action(detail=True, methods=["get"], url_path="historique")
     def historique(self, request, pk=None):
-        stock      = self.get_object()
-        mouvements = stock.mouvements.select_related('created_by').all()
+        stock = self.get_object()
+        mouvements = stock.mouvements.select_related("created_by").all()
         return Response(MouvementStockSerializer(mouvements, many=True).data)
 
+    # ── Mouvements ────────────────────────────────────────────────────────────────
 
-# ── Mouvements ────────────────────────────────────────────────────────────────
+    @action(detail=False, methods=["get"], url_path="alertes-globales")
+    def alertes_globales(self, request):
+        user = request.user
+        if not (user.is_superuser or user.roles.filter(name="superadmin").exists()):
+            return Response({"error": "Permission denied"}, status=403)
+        from pharmacies.models import Pharmacie
+
+        pharmacies = Pharmacie.objects.filter(est_active=True).order_by("nom")
+        date_limite = date.today() + timedelta(days=30)
+        result = []
+        for pharmacie in pharmacies:
+            qs = StockPharmacie.objects.filter(pharmacie=pharmacie).select_related(
+                "medicament"
+            )
+            stock_faible = qs.filter(
+                quantite_stock__gte=0, quantite_stock__lte=F("seuil_alerte")
+            )
+            expire_bientot = qs.filter(medicament__date_expiration__lte=date_limite)
+            rupture_stock = qs.filter(quantite_stock=0)
+            if not (
+                stock_faible.exists()
+                or expire_bientot.exists()
+                or rupture_stock.exists()
+            ):
+                continue
+
+            result.append(
+                {
+                    "pharmacie_id": pharmacie.id,
+                    "pharmacie_nom": pharmacie.nom,
+                    "categorie": pharmacie.categorie,
+                    "stats": {
+                        "total_produits": qs.count(),
+                        "stock_faible": stock_faible.count(),
+                        "expire_bientot": expire_bientot.count(),
+                        "rupture_stock": rupture_stock.count(),
+                    },
+                    "stock_faible": StockPharmacieSerializer(
+                        stock_faible, many=True
+                    ).data,
+                    "expire_bientot": StockPharmacieSerializer(
+                        expire_bientot, many=True
+                    ).data,
+                    "rupture_stock": StockPharmacieSerializer(
+                        rupture_stock, many=True
+                    ).data,
+                }
+            )
+        return Response({"total_pharmacies_alertes": len(result), "pharmacies": result})
+
+    @action(detail=False, methods=["get"], url_path="top-consomme")
+    def top_consomme(self, request):
+
+        from django.db.models import Sum
+        from .models import LigneVente
+
+        user = request.user
+        pharmacie_id = request.query_params.get("pharmacie")
+        qs = LigneVente.objects.select_related("medicament", "vente__pharmacie")
+
+        if user.is_superuser or user.roles.filter(name="superadmin").exists():
+            if pharmacie_id:
+                qs = qs.filter(vente__pharmacie_id=pharmacie_id)
+
+        else:
+            pharmacie = get_pharmacie_user(user)
+            if not pharmacie:
+                return Response(
+                    {"detail": "Aucune pharmacie associée à votre compte."}, status=403
+                )
+            qs = qs.filter(vente__pharmacie__in=pharmacie)
+        top = (
+            qs.values("medicament__id", "medicament__nom")
+            .annotate(total_vendu=Sum("quantite"))
+            .order_by("-total_vendu")
+            .first()
+        )
+        if not top:
+            return Response(None)
+        return Response(
+            {
+                "medicament_id": top["medicament__id"],
+                "medicament_nom": top["medicament__nom"],
+                "total_vendu": top["total_vendu"],
+            }
+        )
+
 
 class MouvementStockViewSet(viewsets.ModelViewSet):
-    serializer_class   = MouvementStockSerializer
+    serializer_class = MouvementStockSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends    = [DjangoFilterBackend, OrderingFilter]
-    filterset_fields   = ['stock', 'stock__pharmacie', 'stock__medicament', 'type']
-    http_method_names  = ['get', 'post']
+    filter_backends = [DjangoFilterBackend, OrderingFilter]
+    filterset_fields = ["stock", "stock__pharmacie", "stock__medicament", "type"]
+    http_method_names = ["get", "post"]
+    queryset = MouvementStock.objects.all()
 
     def _est_admin(self) -> bool:
         return IsAdminRole.est_admin(self.request.user)
 
     def get_queryset(self):
         base_qs = MouvementStock.objects.select_related(
-            'stock__medicament', 'stock__pharmacie', 'created_by'
+            "stock__medicament", "stock__pharmacie", "created_by"
         )
         if self._est_admin():
             return base_qs.all()
-        return base_qs.filter(stock__pharmacie__proprietaire=self.request.user)
+
+        # ✅ CORRIGÉ
+        pharmacie = get_pharmacie_user(self.request.user)
+        if pharmacie:
+            return base_qs.filter(stock__pharmacie=pharmacie)
+        return base_qs.none()
 
     def perform_create(self, serializer):
-        user  = self.request.user
-        stock = serializer.validated_data.get('stock')
-        if not self._est_admin():
-            if stock.pharmacie.proprietaire != user:
-                raise PermissionDenied(
-                    "Vous ne pouvez pas créer un mouvement pour une autre pharmacie."
-                )
-        serializer.save(created_by=user)
+        serializer.save(created_by=self.request.user)
 
 
 # ── Ventes ────────────────────────────────────────────────────────────────────
 
+
 class VenteViewSet(viewsets.ModelViewSet):
-    serializer_class   = VenteSerializer
+    serializer_class = VenteSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends    = [DjangoFilterBackend, OrderingFilter]
-    filterset_fields   = ['pharmacie']
-    ordering_fields    = ['created_at', 'total']
-    # ✅ Lecture + création uniquement — pas de modification/suppression d'une vente
-    http_method_names  = ['get', 'post']
+    filter_backends = [DjangoFilterBackend, OrderingFilter]
+    filterset_fields = ["pharmacie"]
+    ordering_fields = ["created_at", "total"]
+    http_method_names = ["get", "post"]
 
     def _est_admin(self) -> bool:
         return IsAdminRole.est_admin(self.request.user)
 
     def get_queryset(self):
-        base_qs = Vente.objects.prefetch_related(
-            'lignes__medicament'
-        ).select_related('pharmacie', 'created_by')
+        base_qs = Vente.objects.prefetch_related("lignes__medicament").select_related(
+            "pharmacie", "created_by"
+        )
 
         if self._est_admin():
             return base_qs.all()
-        # Pharmacien → uniquement ses propres ventes
-        return base_qs.filter(pharmacie__proprietaire=self.request.user)
+        user = self.request.user
+        pharmacie = get_pharmacie_user(user)
+        if not pharmacie:
+            return base_qs.none()
+        
+        if pharmacie.proprietaire == user:
+            qs = base_qs.filter(pharmacie=pharmacie)            
+            pharmacien_id = self.request.query_params.get("pharmacien")
+            if pharmacien_id:
+                return base_qs.filter(created_by_id=pharmacien_id)
+            return qs
+        
+        user = self.request.user
 
+        pharmacie = get_pharmacie_user(user)
+        if not pharmacie:
+            return base_qs.none()
+
+
+        if pharmacie.proprietaire == user : 
+            return base_qs.filter(pharmacie=pharmacie)
+        return base_qs.filter(pharmacie=pharmacie, created_by=user)
+    
+    
     def get_serializer_context(self):
-        # ✅ Passe le request au serializer pour récupérer la pharmacie
         context = super().get_serializer_context()
-        context['request'] = self.request
+        context["request"] = self.request
         return context
 
-    @action(detail=False, methods=['get'], url_path='stats')
+    def perform_create(self, serializer):
+        vente = serializer.save(created_by=self.request.user)
+        from .sms_service import verifier_et_notifier_stock
+
+        for ligne in vente.lignes.select_related("medicament").all():
+            stock = (
+                StockPharmacie.objects.filter(
+                    pharmacie=vente.pharmacie,
+                    medicament=ligne.medicament,
+                )
+                .select_related("pharmacie__proprietaire", "medicament")
+                .first()
+            )
+            if stock:
+                verifier_et_notifier_stock(stock)
+
+    @action(detail=False, methods=["get"], url_path="stats")
     def stats(self, request):
-        """Statistiques rapides : total ventes du jour, de la semaine, du mois."""
         from django.db.models import Sum, Count
-        from datetime import datetime
 
-        qs          = self.get_queryset()
+        qs = self.get_queryset()
         aujourd_hui = date.today()
-
         debut_semaine = aujourd_hui - timedelta(days=aujourd_hui.weekday())
-        debut_mois    = aujourd_hui.replace(day=1)
+        debut_mois = aujourd_hui.replace(day=1)
 
         def agg(queryset):
-            r = queryset.aggregate(
-                nb_ventes  = Count('id'),
-                total_ca   = Sum('total'),
-            )
+            r = queryset.aggregate(nb_ventes=Count("id"), total_ca=Sum("total"))
             return {
-                'nb_ventes' : r['nb_ventes']  or 0,
-                'total_ca'  : float(r['total_ca'] or 0),
+                "nb_ventes": r["nb_ventes"] or 0,
+                "total_ca": float(r["total_ca"] or 0),
             }
 
-        return Response({
-            'aujourd_hui' : agg(qs.filter(created_at__date=aujourd_hui)),
-            'semaine'     : agg(qs.filter(created_at__date__gte=debut_semaine)),
-            'mois'        : agg(qs.filter(created_at__date__gte=debut_mois)),
-        })
+        return Response(
+            {
+                "aujourd_hui": agg(qs.filter(created_at__date=aujourd_hui)),
+                "semaine": agg(qs.filter(created_at__date__gte=debut_semaine)),
+                "mois": agg(qs.filter(created_at__date__gte=debut_mois)),
+            }
+        )
+
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+
+class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = NotificationSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, OrderingFilter]
+    filterset_fields = ["pharmacie", "medicament", "type", "statut"]
+    ordering_fields = ["created_at"]
+
+    def _est_admin(self) -> bool:
+        return IsAdminRole.est_admin(self.request.user)
+
+    def get_queryset(self):
+        base_qs = Notification.objects.select_related("pharmacie", "medicament")
+        if self._est_admin():
+            return base_qs.all()
+
+        # ✅ CORRIGÉ
+        pharmacie = get_pharmacie_user(self.request.user)
+        if pharmacie:
+            return base_qs.filter(pharmacie=pharmacie)
+        return base_qs.none()
+
+    @action(detail=False, methods=["get"], url_path="resume")
+    def resume(self, request):
+        from django.db.models import Count
+
+        qs = self.get_queryset()
+        return Response(
+            {
+                "par_type": list(qs.values("type").annotate(total=Count("id"))),
+                "par_statut": list(qs.values("statut").annotate(total=Count("id"))),
+                "total": qs.count(),
+            }
+        )
+
+
+# ── ATC ───────────────────────────────────────────────────────────────────────
+
+
+class ATCViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = ATC.objects.prefetch_related("categories").all()
+    serializer_class = ATCSerializer
+    permission_classes = [IsAuthenticated]

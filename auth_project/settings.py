@@ -40,11 +40,15 @@ INSTALLED_APPS = [
     'stock',
     'reservations',
     'urgences',
+    'dashboard',
+    'channels',
+    'messagerie',
 ]
 
 CRONJOBS = [
     ('1 0 1 * *', 'django.core.management.call_command', ['generer_gardes']),
     ('0 1 1 * *', 'django.core.management.call_command', ['generer_horaires_ramadan']),
+    ('0 8 * * *', 'django.core.management.call_command', ['envoyer_alertes_expiration']),
 ]
 
 MIDDLEWARE = [
@@ -86,6 +90,16 @@ EMAIL_HOST_USER     = 'chaimakharoubi73@gmail.com'
 EMAIL_HOST_PASSWORD = 'pwkt vxrj yoaj ubno'
 DEFAULT_FROM_EMAIL  = 'chaimakharoubi73@gmail.com'
 
+ASGI_APPLICATION = 'auth_project.asgi.application'
+
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            'hosts': [('127.0.0.1', 6379)],
+        },
+    },
+}
 
 # Database
 DATABASES = {
@@ -120,6 +134,9 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# ─── Reset password ───────────────────────────────────────────────────────────
+PASSWORD_RESET_TIMEOUT = 3600  # 1 heure (cohérent avec le message email)
+
 # Modèle utilisateur personnalisé
 AUTH_USER_MODEL = 'accounts.User'
 
@@ -148,11 +165,6 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 
 
-# Twilio SMS
-TWILIO_ACCOUNT_SID = 'AC2c04d13813aac77234eb22b2463687c8'
-TWILIO_AUTH_TOKEN  = 'c25e35b14462c2385f0aaad415fcb7b3'
-TWILIO_FROM_NUMBER = '+16624282878'   
-
 
 CORS_ALLOW_CREDENTIALS = True  # ✅ indispensable pour les cookies
 
@@ -171,4 +183,15 @@ SIMPLE_JWT = {
     'AUTH_COOKIE_HTTPONLY'   : True,
     'AUTH_COOKIE_SAMESITE'   : 'Lax',
     'AUTH_COOKIE_SECURE'     : False,  # dev only — mettre True en production
+}
+# ─── Channels / WebSocket ─────────────────────────────────────────────────────
+ASGI_APPLICATION = 'auth_project.asgi.application'
+
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            'hosts': [('127.0.0.1', 6379)],
+        },
+    },
 }

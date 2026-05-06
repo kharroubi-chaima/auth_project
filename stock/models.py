@@ -3,7 +3,7 @@ from django.conf import settings
 from datetime import date, timedelta
 
 
-class Categorie(models.Model):
+class ATC(models.Model):
     nom         = models.CharField(max_length=100)
     description = models.TextField(blank=True, null=True)
 
@@ -12,6 +12,21 @@ class Categorie(models.Model):
 
     def __str__(self):
         return self.nom
+
+
+class Categorie(models.Model):
+    atc         = models.ForeignKey(
+                      ATC, on_delete=models.CASCADE,
+                      related_name='categories',
+                      null=True, blank=True)
+    nom         = models.CharField(max_length=100)
+    description = models.TextField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['nom']
+
+    def __str__(self):
+        return f"{self.atc} → {self.nom}"
 
 
 class Medicament(models.Model):
@@ -104,21 +119,33 @@ class MouvementStock(models.Model):
     def __str__(self):
         return f"{self.type} {self.quantite} — {self.stock}"
 
-
+    # — met à jour quantite_stock à chaque création
+    def save(self, *args, **kwargs):
+        is_new = self.pk is None
+        super().save(*args, **kwargs)
+        if is_new:
+            if self.type == 'entree':
+                StockPharmacie.objects.filter(pk=self.stock_id).update(
+                    quantite_stock=models.F('quantite_stock') + self.quantite
+                )
+            elif self.type == 'sortie':
+                StockPharmacie.objects.filter(pk=self.stock_id).update(
+                    quantite_stock=models.F('quantite_stock') - self.quantite
+                )
+            elif self.type == 'ajustement':
+                StockPharmacie.objects.filter(pk=self.stock_id).update(
+                    quantite_stock=models.F('quantite_stock') + self.quantite
+                )
+                
 # ── Ventes ────────────────────────────────────────────────────────────────────
 
 class Vente(models.Model):
-    """
-    Représente une vente complète (panier).
-    Une vente contient plusieurs LigneVente.
-    """
     pharmacie    = models.ForeignKey(
                        'pharmacies.Pharmacie', on_delete=models.CASCADE,
                        related_name='ventes')
     created_by   = models.ForeignKey(
                        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                        null=True, blank=True, related_name='ventes')
-    # Total calculé et sauvegardé au moment de la vente
     total        = models.DecimalField(max_digits=12, decimal_places=3, default=0)
     note         = models.TextField(blank=True, null=True)
     created_at   = models.DateTimeField(auto_now_add=True)
@@ -130,7 +157,6 @@ class Vente(models.Model):
         return f"Vente #{self.pk} — {self.pharmacie.nom} — {self.total} TND"
 
     def calculer_total(self):
-        """Recalcule et sauvegarde le total depuis les lignes."""
         total = sum(l.sous_total for l in self.lignes.all())
         self.total = total
         self.save(update_fields=['total'])
@@ -138,10 +164,6 @@ class Vente(models.Model):
 
 
 class LigneVente(models.Model):
-    """
-    Une ligne dans une vente : un médicament, une quantité, un prix unitaire.
-    Le prix_unitaire est figé au moment de la vente (même si prix_vente change après).
-    """
     vente          = models.ForeignKey(
                          Vente, on_delete=models.CASCADE,
                          related_name='lignes')
@@ -149,7 +171,6 @@ class LigneVente(models.Model):
                          Medicament, on_delete=models.PROTECT,
                          related_name='lignes_vente')
     quantite       = models.PositiveIntegerField()
-    # Prix figé au moment de la vente
     prix_unitaire  = models.DecimalField(max_digits=10, decimal_places=3)
 
     class Meta:
@@ -161,3 +182,36 @@ class LigneVente(models.Model):
     @property
     def sous_total(self):
         return self.quantite * self.prix_unitaire
+
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+class Notification(models.Model):
+    TYPE_CHOICES = [
+        ('stock_faible',          'Stock faible'),
+        ('rupture_stock',         'Rupture de stock'),
+        ('expiration',            'Expiration proche'),
+        ('reservation_recuperee', 'Réservation récupérée'),  # ← AJOUT
+    ]
+    STATUT_CHOICES = [
+        ('envoye', 'Envoyé'),
+        ('echec',  'Échec'),
+    ]
+
+    pharmacie    = models.ForeignKey(
+                       'pharmacies.Pharmacie', on_delete=models.CASCADE,
+                       related_name='notifications')
+    medicament   = models.ForeignKey(
+                       'Medicament', on_delete=models.CASCADE,
+                       related_name='notifications')
+    type         = models.CharField(max_length=30, choices=TYPE_CHOICES)  # max_length augmenté pour le nouveau type
+    message      = models.TextField()
+    statut       = models.CharField(max_length=10, choices=STATUT_CHOICES)
+    destinataire = models.CharField(max_length=20)
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"[{self.type}] {self.medicament.nom} – {self.statut}"

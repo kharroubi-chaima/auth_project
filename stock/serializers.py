@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.db import transaction
 from django.apps import apps
-from .models import Medicament, Categorie, MouvementStock, StockPharmacie, Vente, LigneVente
+from .models import ATC, Medicament, Categorie, MouvementStock, StockPharmacie, Vente, LigneVente
 
 
 class CategorieSerializer(serializers.ModelSerializer):
@@ -12,16 +12,38 @@ class CategorieSerializer(serializers.ModelSerializer):
 
 class MedicamentSerializer(serializers.ModelSerializer):
     categorie_nom  = serializers.CharField(source='categorie.nom', read_only=True)
-    expire_bientot = serializers.BooleanField(read_only=True)
-    stock_faible   = serializers.BooleanField(read_only=True)
-    en_rupture     = serializers.BooleanField(read_only=True)
+    expire_bientot = serializers.SerializerMethodField()
+    stock_faible   = serializers.SerializerMethodField()
+    en_rupture     = serializers.SerializerMethodField()
 
     nom             = serializers.CharField()
     categorie       = serializers.PrimaryKeyRelatedField(queryset=Categorie.objects.all())
     prix_achat      = serializers.DecimalField(max_digits=10, decimal_places=3)
     prix_vente      = serializers.DecimalField(max_digits=10, decimal_places=3)
     date_expiration = serializers.DateField()
-    quantite_stock  = serializers.IntegerField(min_value=0)
+    quantite_stock  = serializers.SerializerMethodField()
+
+
+    def get_expire_bientot(self, obj):
+        from datetime import date, timedelta
+        if not obj.date_expiration:
+            return False
+        return obj.date_expiration <= date.today() + timedelta(days=30)
+    def get_stock_faible(self, obj):
+        q = getattr(obj, 'quantite_stock_reel', None)
+        if q is None:
+            q = obj.quantite_stock
+        return 0 < q <= obj.seuil_alerte 
+    def get_en_rupture(self, obj):
+        q = getattr(obj, 'quantite_stock_reel', None)
+        if q is None:
+            q = obj.quantite_stock
+        return q == 0
+    
+    
+    def get_quantite_stock(self, obj):
+        val = getattr(obj, 'quantite_stock_reel', None)
+        return val if val is not None else 0
     seuil_alerte    = serializers.IntegerField(min_value=0)
     dci             = serializers.CharField(allow_null=True, allow_blank=True, required=False)
     description     = serializers.CharField(allow_null=True, allow_blank=True, required=False)
@@ -91,20 +113,17 @@ class MouvementStockSerializer(serializers.ModelSerializer):
         return None
 
     def validate(self, data):
-        stock    = data.get('stock')
-        type_mvt = data.get('type')
-        quantite = data.get('quantite', 0)
-        if type_mvt == 'sortie':
-            if quantite <= 0:
-                raise serializers.ValidationError("La quantité d'une sortie doit être strictement positive.")
-            if quantite > stock.quantite_stock:
-                raise serializers.ValidationError(f"Stock insuffisant. Stock actuel : {stock.quantite_stock}")
-        if type_mvt == 'ajustement':
-            if stock.quantite_stock + quantite < 0:
-                raise serializers.ValidationError(f"L'ajustement amènerait le stock à {stock.quantite_stock + quantite}.")
-        if type_mvt == 'entree' and quantite <= 0:
-            raise serializers.ValidationError("La quantité d'une entrée doit être strictement positive.")
+        if data['type'] =='sortie' and data['quantite'] > data['stock'].quantite_stock:
+            raise serializers.ValidationError(
+                f"Stock insuffisant pour {data['stock'].medicament.nom}. "
+                f"Disponible : {data['stock'].quantite_stock}"
+            )
         return data
+    
+    def create(self, validated_data):
+        mouvement = MouvementStock.objects.create(**validated_data)
+        return mouvement
+
 
 
 # ── Ventes ────────────────────────────────────────────────────────────────────
@@ -148,11 +167,16 @@ class VenteSerializer(serializers.ModelSerializer):
         lignes_data = validated_data.pop('lignes')
         user        = self.context['request'].user
 
-        # ✅ Utilise apps.get_model pour éviter tout problème de related_name
+        # Utilise apps.get_model pour éviter tout problème de related_name
         # et cherche directement par le champ proprietaire
-        Pharmacie = apps.get_model('pharmacies', 'Pharmacie')
+        
+        from pharmacies.models import Pharmacie  # Import direct pour éviter les problèmes de related_name  
+        
         pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
 
+        if not pharmacie:
+            pharmacie = user.pharmacies_travail.filter(est_active=True).first()  
+            
         if not pharmacie:
             raise serializers.ValidationError(
                 "Aucune pharmacie associée à cet utilisateur. "
@@ -171,17 +195,24 @@ class VenteSerializer(serializers.ModelSerializer):
             quantite      = ligne_data['quantite']
             prix_unitaire = ligne_data.get('prix_unitaire', medicament.prix_vente)
 
-            # Vérification stock disponible
-            if medicament.quantite_stock < quantite:
+            stock = StockPharmacie.objects.filter(
+                pharmacie=pharmacie,
+                medicament=medicament
+            ).first()
+            
+            if not stock:
+                raise serializers.ValidationError(
+                    f"Le médicament {medicament.nom} n'est pas disponible dans votre pharmacie."
+                )
+            if stock.quantite_stock < quantite:
                 raise serializers.ValidationError(
                     f"Stock insuffisant pour {medicament.nom}. "
-                    f"Disponible : {medicament.quantite_stock}"
+                    f"Disponible : {stock.quantite_stock}"
                 )
-
-            # Déduction du stock
-            medicament.quantite_stock -= quantite
-            medicament.save(update_fields=['quantite_stock'])
-
+            
+            stock.quantite_stock -= quantite
+            stock.save(update_fields=['quantite_stock'])
+            
             LigneVente.objects.create(
                 vente         = vente,
                 medicament    = medicament,
@@ -189,7 +220,39 @@ class VenteSerializer(serializers.ModelSerializer):
                 prix_unitaire = prix_unitaire,
             )
             total += quantite * prix_unitaire
-
+            
         vente.total = total
         vente.save(update_fields=['total'])
         return vente
+            
+    
+from .models import Medicament, Categorie, MouvementStock, StockPharmacie, Vente, Notification
+
+class NotificationSerializer(serializers.ModelSerializer):
+    pharmacie_nom  = serializers.CharField(source='pharmacie.nom',      read_only=True)
+    medicament_nom = serializers.CharField(source='medicament.nom',     read_only=True)
+    type_display   = serializers.CharField(source='get_type_display',   read_only=True)
+    statut_display = serializers.CharField(source='get_statut_display', read_only=True)
+
+    class Meta:
+        model  = Notification
+        fields = [
+            'id',
+            'pharmacie', 'pharmacie_nom',
+            'medicament', 'medicament_nom',
+            'type', 'type_display',
+            'message',
+            'statut', 'statut_display',
+            'destinataire',
+            'created_at',
+        ]
+        read_only_fields = fields
+        
+        
+# serializers.py
+class ATCSerializer(serializers.ModelSerializer):
+    categories = CategorieSerializer(many=True, read_only=True)
+
+    class Meta:
+        model  = ATC
+        fields = ['id', 'nom', 'description', 'categories']

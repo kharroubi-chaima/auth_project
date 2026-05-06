@@ -7,27 +7,27 @@ User = get_user_model()
 
 
 class Command(BaseCommand):
-    help = 'Initialise les permissions, rôles, et crée le compte administrateur'
+    help = 'Initialise les permissions, rôles, et crée les comptes superadmin et administrateur'
+
+    # ─── COORDONNÉES SUPERADMIN ───────────────────────────────
+    SUPERADMIN_EMAIL      = 'superadmin@gestionpharmacie.tn'
+    SUPERADMIN_PASSWORD   = 'SuperAdmin@2026!'
+    SUPERADMIN_FIRST_NAME = 'Super'
+    SUPERADMIN_LAST_NAME  = 'Admin'
 
     # ─── COORDONNÉES ADMIN ────────────────────────────────────
     ADMIN_EMAIL      = 'admin@gestionpharmacie.tn'
     ADMIN_PASSWORD   = 'Admin@2026!'
-    ADMIN_FIRST_NAME = 'Super'
-    ADMIN_LAST_NAME  = 'Admin'
-    
-    ADMIN_EMAIL      = 'Mohamed@gestionpharmacie.tn'
-    ADMIN_PASSWORD   = 'Mohamed@2026!'
-    ADMIN_FIRST_NAME = 'Mohamed'
-    ADMIN_LAST_NAME  = 'Mohamed'
-
+    ADMIN_FIRST_NAME = 'Admin'
+    ADMIN_LAST_NAME  = 'Principal'
 
     # ─── DÉFINITION DES PERMISSIONS PAR CATÉGORIE ─────────────
     PERMISSIONS = {
         'utilisateurs': [
-            'view_user',        # voir la liste des utilisateurs
-            'add_user',         # créer un compte pharmacien
-            'change_user',      # modifier un utilisateur
-            'delete_user',      # supprimer un utilisateur
+            'view_user',
+            'add_user',
+            'change_user',
+            'delete_user',
         ],
         'roles': [
             'view_role',
@@ -42,10 +42,10 @@ class Command(BaseCommand):
             'delete_permission',
         ],
         'pharmacies': [
-            'view_pharmacie',   # voir les pharmacies
-            'add_pharmacie',    # créer une pharmacie
-            'change_pharmacie', # modifier une pharmacie
-            'delete_pharmacie', # supprimer une pharmacie
+            'view_pharmacie',
+            'add_pharmacie',
+            'change_pharmacie',
+            'delete_pharmacie',
         ],
         'horaires': [
             'view_horaire',
@@ -76,61 +76,82 @@ class Command(BaseCommand):
             'delete_delegation',
         ],
         'public': [
-            'view_pharmacie_publique',  # consultation publique pharmacies
-            'view_garde_publique',      # consultation publique gardes
-            'view_horaire_publique',    # consultation publique horaires
+            'view_pharmacie_publique',
+            'view_garde_publique',
+            'view_horaire_publique',
+        ],
+        # Permissions spécifiques superadmin
+        'superadmin': [
+            'manage_admins',        # créer / supprimer des administrateurs
+            'manage_all_users',     # accès total à tous les comptes
+            'manage_all_pharmacies', # accès total à toutes les pharmacies
+            'suspend_account',      # suspendre n'importe quel compte
         ],
     }
 
     # ─── PERMISSIONS PAR RÔLE ─────────────────────────────────
     ROLE_PERMISSIONS = {
 
-        # ── Administrateur : accès total ──────────────────────
-        # Peut tout faire, y compris créer des comptes pharmaciens (add_user)
-        'administrateur': '__all__',
+        # ── Superadmin : accès absolu ─────────────────────────
+        # Peut tout faire + gestion des administrateurs
+        'superadmin': '__all__',
 
-        # ── Pharmacien : gère sa pharmacie ────────────────────
-        # Ne peut PAS créer d'autres utilisateurs (pas de add_user)
-        # Ne peut PAS supprimer sa pharmacie (pas de delete_pharmacie)
-        'pharmacien': [
-            # Utilisateurs → lecture seule
+        # ── Administrateur : accès large (sauf gestion des admins) ─
+        # Ne peut PAS créer d'autres administrateurs
+        # Ne peut PAS supprimer des pharmacies
+        'administrateur': [
             'view_user',
-
-            # Rôles & permissions → lecture seule
+            'add_user',         # créer des pharmaciens
+            'change_user',
+            'delete_user',
             'view_role',
             'view_permission',
-
-            # Sa pharmacie → lecture + modification (pas suppression)
             'view_pharmacie',
+            'add_pharmacie',
             'change_pharmacie',
-
-            # Ses horaires → CRUD complet
             'view_horaire',
             'add_horaire',
             'change_horaire',
             'delete_horaire',
-
-            # Ses gardes → lecture + création + modification
             'view_garde',
             'add_garde',
             'change_garde',
-
-            # Jours fériés → lecture seule
+            'delete_garde',
             'view_jourferie',
-
-            # Localisations → lecture seule
+            'add_jourferie',
+            'change_jourferie',
+            'delete_jourferie',
             'view_gouvernorat',
             'view_delegation',
+            'view_pharmacie_publique',
+            'view_garde_publique',
+            'view_horaire_publique',
+            'suspend_account',
+        ],
 
-            # Consultation publique
+        # ── Pharmacien : gère sa pharmacie ────────────────────
+        'pharmacien': [
+            'view_user',
+            'view_role',
+            'view_permission',
+            'view_pharmacie',
+            'change_pharmacie',
+            'view_horaire',
+            'add_horaire',
+            'change_horaire',
+            'delete_horaire',
+            'view_garde',
+            'add_garde',
+            'change_garde',
+            'view_jourferie',
+            'view_gouvernorat',
+            'view_delegation',
             'view_pharmacie_publique',
             'view_garde_publique',
             'view_horaire_publique',
         ],
 
         # ── Citoyen : consultation publique uniquement ────────
-        # Peut uniquement consulter les infos publiques
-        # Ne peut PAS modifier quoi que ce soit
         'citoyen': [
             'view_pharmacie_publique',
             'view_garde_publique',
@@ -140,10 +161,8 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
 
-        # ── ÉTAPE 1 : Création des permissions ────────────────
-        self.stdout.write(self.style.HTTP_INFO(
-            '\n🔐 Étape 1 : Création des permissions...'
-        ))
+        # ── ÉTAPE 1 : Permissions ──────────────────────────────
+        self.stdout.write(self.style.HTTP_INFO('\n🔐 Étape 1 : Création des permissions...'))
         perm_objects   = {}
         total_created  = 0
         total_existing = 0
@@ -164,10 +183,8 @@ class Command(BaseCommand):
             f'\n   → {total_created} créées, {total_existing} déjà existantes'
         ))
 
-        # ── ÉTAPE 2 : Création des rôles ──────────────────────
-        self.stdout.write(self.style.HTTP_INFO(
-            '\n👥 Étape 2 : Création des rôles...'
-        ))
+        # ── ÉTAPE 2 : Rôles ───────────────────────────────────
+        self.stdout.write(self.style.HTTP_INFO('\n👥 Étape 2 : Création des rôles...'))
         roles = {}
         for role_name in self.ROLE_PERMISSIONS.keys():
             role, created = Role.objects.get_or_create(name=role_name)
@@ -179,8 +196,6 @@ class Command(BaseCommand):
         self.stdout.write(self.style.HTTP_INFO(
             '\n🔗 Étape 3 : Assignation des permissions aux rôles...'
         ))
-
-        # Toutes les permissions à plat pour __all__
         all_perms = [
             perm_name
             for perms in self.PERMISSIONS.values()
@@ -200,9 +215,7 @@ class Command(BaseCommand):
                         f'      ⚠️  Permission introuvable : {perm_name}'
                     ))
                     continue
-                _, created = RolePermission.objects.get_or_create(
-                    role=role, permission=perm
-                )
+                _, created = RolePermission.objects.get_or_create(role=role, permission=perm)
                 if created:
                     assigned += 1
                 else:
@@ -214,32 +227,57 @@ class Command(BaseCommand):
                 f'({len(perms_to_assign)} au total)'
             )
 
-        # Vérification finale des assignations
-        self.stdout.write(self.style.HTTP_INFO('\n   📊 Vérification :'))
-        for role_name, role in roles.items():
-            nb_perms = role.role_permissions.count()
-            self.stdout.write(f'      {role_name:<20} → {nb_perms} permissions')
-
-        # ── ÉTAPE 4 : Création du compte admin ────────────────
+        # ── ÉTAPE 4 : Compte superadmin ───────────────────────
         self.stdout.write(self.style.HTTP_INFO(
-            '\n👤 Étape 4 : Création du compte administrateur...'
+            '\n👑 Étape 4 : Création du compte superadmin...'
         ))
-
-        user, created = User.objects.get_or_create(
-            email=self.ADMIN_EMAIL,
+        superadmin, created = User.objects.get_or_create(
+            email=self.SUPERADMIN_EMAIL,
             defaults={
-                'first_name'  : self.ADMIN_FIRST_NAME,
-                'last_name'   : self.ADMIN_LAST_NAME,
+                'first_name'  : self.SUPERADMIN_FIRST_NAME,
+                'last_name'   : self.SUPERADMIN_LAST_NAME,
                 'is_staff'    : True,
                 'is_superuser': True,
                 'is_active'   : True,
                 'status'      : 'active',
             }
         )
-
         if created:
-            user.set_password(self.ADMIN_PASSWORD)
-            user.save()
+            superadmin.set_password(self.SUPERADMIN_PASSWORD)
+            superadmin.save()
+            self.stdout.write(self.style.SUCCESS(
+                f'\n   ✅ Superadmin créé !\n'
+                f'      Email    : {self.SUPERADMIN_EMAIL}\n'
+                f'      Password : {self.SUPERADMIN_PASSWORD}\n'
+            ))
+        else:
+            self.stdout.write(self.style.WARNING(
+                f'\n   ⏭️  Superadmin déjà existant ({self.SUPERADMIN_EMAIL})'
+            ))
+
+        role_superadmin = roles.get('superadmin')
+        _, role_created = UserRole.objects.get_or_create(user=superadmin, role=role_superadmin)
+        flag = '✅ Rôle superadmin assigné' if role_created else '⏭️  Rôle déjà assigné'
+        self.stdout.write(f'   {flag}')
+
+        # ── ÉTAPE 5 : Compte administrateur ───────────────────
+        self.stdout.write(self.style.HTTP_INFO(
+            '\n👤 Étape 5 : Création du compte administrateur...'
+        ))
+        admin, created = User.objects.get_or_create(
+            email=self.ADMIN_EMAIL,
+            defaults={
+                'first_name'  : self.ADMIN_FIRST_NAME,
+                'last_name'   : self.ADMIN_LAST_NAME,
+                'is_staff'    : True,
+                'is_superuser': False,
+                'is_active'   : True,
+                'status'      : 'active',
+            }
+        )
+        if created:
+            admin.set_password(self.ADMIN_PASSWORD)
+            admin.save()
             self.stdout.write(self.style.SUCCESS(
                 f'\n   ✅ Administrateur créé !\n'
                 f'      Email    : {self.ADMIN_EMAIL}\n'
@@ -250,19 +288,15 @@ class Command(BaseCommand):
                 f'\n   ⏭️  Administrateur déjà existant ({self.ADMIN_EMAIL})'
             ))
 
-        # ── ÉTAPE 5 : Assignation rôle administrateur → admin ─
-        self.stdout.write(self.style.HTTP_INFO(
-            '\n🔗 Étape 5 : Assignation du rôle administrateur...'
-        ))
-        role_admin      = roles.get('administrateur')
-        _, role_created = UserRole.objects.get_or_create(
-            user=user, role=role_admin
-        )
-        if role_created:
-            self.stdout.write(self.style.SUCCESS(
-                '   ✅ Rôle administrateur assigné'
-            ))
-        else:
-            self.stdout.write(
-                '   ⏭️  Rôle déjà assigné'
-            )
+        role_admin = roles.get('administrateur')
+        _, role_created = UserRole.objects.get_or_create(user=admin, role=role_admin)
+        flag = '✅ Rôle administrateur assigné' if role_created else '⏭️  Rôle déjà assigné'
+        self.stdout.write(f'   {flag}')
+
+        # ── Résumé ────────────────────────────────────────────
+        self.stdout.write(self.style.HTTP_INFO('\n📊 Vérification finale :'))
+        for role_name, role in roles.items():
+            nb_perms = role.role_permissions.count()
+            self.stdout.write(f'   {role_name:<20} → {nb_perms} permissions')
+
+        self.stdout.write(self.style.SUCCESS('\n✅ Initialisation terminée !\n'))

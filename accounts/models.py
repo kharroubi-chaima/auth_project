@@ -7,10 +7,10 @@ from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, Permis
 class UserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
         if not email:
-            raise ValueError('L\'email est obligatoire')
+            raise ValueError("L'email est obligatoire")
         email = self.normalize_email(email)
-        # Par défaut is_active = False → activation via 2FA
-        extra_fields.setdefault('is_active', False)
+        # is_active = True dès l'inscription (plus de blocage TOTP à l'inscription)
+        extra_fields.setdefault('is_active', True)
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
@@ -19,7 +19,7 @@ class UserManager(BaseUserManager):
     def create_superuser(self, email, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
-        extra_fields.setdefault('is_active', True)  # superuser actif directement
+        extra_fields.setdefault('is_active', True)
         return self.create_user(email, password, **extra_fields)
 
 
@@ -35,15 +35,22 @@ class User(AbstractBaseUser, PermissionsMixin):
         default='active'
     )
     is_staff     = models.BooleanField(default=False)
-    is_active    = models.BooleanField(default=False)  # ← False par défaut
+    is_active    = models.BooleanField(default=True)   # ← True par défaut maintenant
     date_joined  = models.DateTimeField(auto_now_add=True)
     totp_secret  = models.CharField(max_length=32, blank=True, null=True)
     totp_enabled = models.BooleanField(default=False)
+    pharmacies_travail = models.ManyToManyField(
+        'pharmacies.Pharmacie',
+        blank=True,
+        related_name='pharmaciens',
+    )
 
     objects = UserManager()
 
     USERNAME_FIELD  = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name']
+
+    # ── TOTP helpers (utilisés uniquement pour le reset password) ──────────────
 
     def generate_totp_secret(self):
         import pyotp
@@ -57,7 +64,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         import pyotp
         return pyotp.totp.TOTP(self.totp_secret).provisioning_uri(
             name=self.email,
-            issuer_name= "GestionPharmacie"
+            issuer_name="GestionPharmacie"
         )
 
     def verify_totp(self, code):
@@ -65,6 +72,27 @@ class User(AbstractBaseUser, PermissionsMixin):
             return False
         import pyotp
         return pyotp.TOTP(self.totp_secret).verify(code, valid_window=1)
+
+    # ── Helpers rôles ──────────────────────────────────────────────────────────
+
+    def has_role(self, *role_names):
+        return self.roles.filter(name__in=role_names).exists()
+
+    @property
+    def is_superadmin(self):
+        return self.is_superuser or self.has_role('superadmin')
+
+    @property
+    def is_admin(self):
+        return self.has_role('administrateur') or self.is_superadmin
+
+    @property
+    def is_pharmacien(self):
+        return self.has_role('pharmacien')
+
+    @property
+    def is_citoyen(self):
+        return self.has_role('citoyen')
 
     def __str__(self):
         return self.email

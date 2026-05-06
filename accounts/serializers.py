@@ -7,7 +7,8 @@ import string
 from .models import User, Role, Permission, UserRole, RolePermission
 
 
-# ── Must be defined before UserSerializer ──────────────────────────────────────
+# ── Rôles & permissions ────────────────────────────────────────────────────────
+
 class RoleSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Role
@@ -34,9 +35,14 @@ class RolePermissionSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-# ── User serializers ───────────────────────────────────────────────────────────
+# ── Inscription citoyen (sans TOTP) ───────────────────────────────────────────
+
 class UserSerializer(serializers.ModelSerializer):
-    """Serializer pour l'inscription publique (citoyen)"""
+    """
+    Inscription publique d'un citoyen.
+    Le compte est actif immédiatement — pas de TOTP requis à l'inscription.
+    Le TOTP reste disponible en option (setup + disable) mais n'est plus obligatoire.
+    """
     password = serializers.CharField(
         write_only=True, required=True,
         style={'input_type': 'password'}
@@ -46,14 +52,15 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model  = User
         fields = [
-            'id', 'first_name', 'last_name', 'email','telephone',
+            'id', 'first_name', 'last_name', 'email', 'telephone',
             'password', 'status', 'date_joined',
-            'is_active', 'is_staff', 'totp_enabled', 'roles'
+            'is_active', 'is_staff', 'totp_enabled', 'roles',
         ]
         read_only_fields = ['id', 'date_joined', 'is_active', 'totp_enabled']
 
     def create(self, validated_data):
         password = validated_data.pop('password')
+        # is_active=True par défaut dans UserManager — connexion possible immédiatement
         user = User.objects.create_user(password=password, **validated_data)
         try:
             role_citoyen = Role.objects.get(name='citoyen')
@@ -72,27 +79,24 @@ class UserSerializer(serializers.ModelSerializer):
         return instance
 
 
+# ── Profil utilisateur connecté ───────────────────────────────────────────────
+
 class UserProfileSerializer(serializers.ModelSerializer):
-    """
-    Serializer pour la modification du profil.
-    Utilisé par le pharmacien et le citoyen pour mettre à jour leurs infos.
-    Le mot de passe, is_active, is_staff, totp_enabled ne sont pas modifiables ici.
-    """
     class Meta:
         model  = User
         fields = [
             'id', 'first_name', 'last_name', 'email', 'telephone',
-            'status', 'date_joined', 'is_active',
-            'is_staff', 'totp_enabled'
+            'status', 'date_joined', 'is_active', 'is_staff', 'totp_enabled',
         ]
         read_only_fields = [
             'id', 'date_joined', 'is_active',
-            'is_staff', 'totp_enabled', 'status'
+            'is_staff', 'totp_enabled', 'status',
         ]
 
 
+# ── Changement de mot de passe ────────────────────────────────────────────────
+
 class ChangePasswordSerializer(serializers.Serializer):
-    """Serializer pour changer le mot de passe (profil connecté)"""
     ancien_password  = serializers.CharField(write_only=True)
     nouveau_password = serializers.CharField(write_only=True, min_length=8)
 
@@ -108,24 +112,17 @@ class ChangePasswordSerializer(serializers.Serializer):
         return value
 
 
+# ── Création compte pharmacien (par admin/superadmin) ─────────────────────────
+
 class PharmacienCreateSerializer(serializers.ModelSerializer):
-    """
-    Serializer utilisé par l'admin pour créer un compte pharmacien.
-    - Mot de passe généré automatiquement
-    - Compte actif directement (sans TOTP)
-    - Credentials envoyés par email
-    - Le pharmacien peut compléter son profil via /users/me/update/
-    """
     class Meta:
         model  = User
         fields = [
             'id', 'first_name', 'last_name', 'email',
-            'status', 'date_joined', 'is_active',
-            'is_staff', 'totp_enabled'
+            'status', 'date_joined', 'is_active', 'is_staff', 'totp_enabled',
         ]
         read_only_fields = [
-            'id', 'date_joined', 'is_active',
-            'is_staff', 'totp_enabled'
+            'id', 'date_joined', 'is_active', 'is_staff', 'totp_enabled',
         ]
 
     def _generer_mot_de_passe(self, longueur=12):
@@ -160,24 +157,14 @@ class PharmacienCreateSerializer(serializers.ModelSerializer):
 
     def _envoyer_email_credentials(self, user, password_clair):
         sujet   = "Vos identifiants de connexion — Gestion Pharmacie"
-        message = f"""
-Bonjour {user.first_name} {user.last_name},
-
-Votre compte pharmacien a été créé par l'administrateur.
-
-Voici vos identifiants de connexion :
-  - Email        : {user.email}
-  - Mot de passe : {password_clair}
-
-Connectez-vous sur : http://localhost:4200/signin
-
-Après votre première connexion, vous pouvez :
-  - Compléter votre profil
-  - Changer votre mot de passe via Mon Profil → Changer le mot de passe
-
-Cordialement,
-L'équipe Gestion Pharmacie
-        """.strip()
+        message = (
+            f"Bonjour {user.first_name} {user.last_name},\n\n"
+            f"Votre compte pharmacien a été créé.\n\n"
+            f"Email        : {user.email}\n"
+            f"Mot de passe : {password_clair}\n\n"
+            f"Connectez-vous sur : http://localhost:4200/connexion\n\n"
+            f"Cordialement,\nL'équipe Gestion Pharmacie"
+        )
         send_mail(
             subject        = sujet,
             message        = message,
@@ -187,7 +174,91 @@ L'équipe Gestion Pharmacie
         )
 
 
-# ── TOTP serializers ───────────────────────────────────────────────────────────
+# ── Création compte administrateur (par superadmin uniquement) ────────────────
+
+class AdminCreateSerializer(serializers.ModelSerializer):
+    """
+    Crée un compte administrateur (rôle 'administrateur').
+    Réservé au superadmin.
+    """
+    class Meta:
+        model  = User
+        fields = [
+            'id', 'first_name', 'last_name', 'email', 'telephone',
+            'status', 'date_joined', 'is_active', 'is_staff', 'totp_enabled',
+        ]
+        read_only_fields = [
+            'id', 'date_joined', 'is_active', 'is_staff', 'totp_enabled',
+        ]
+
+    def _generer_mot_de_passe(self, longueur=14):
+        alphabet = (
+            string.ascii_uppercase +
+            string.ascii_lowercase +
+            string.digits +
+            "!@#$%^&*"
+        )
+        mdp = [
+            secrets.choice(string.ascii_uppercase),
+            secrets.choice(string.ascii_lowercase),
+            secrets.choice(string.digits),
+            secrets.choice("!@#$%^&*"),
+        ]
+        mdp += [secrets.choice(alphabet) for _ in range(longueur - 4)]
+        secrets.SystemRandom().shuffle(mdp)
+        return ''.join(mdp)
+
+    def create(self, validated_data):
+        password_clair = self._generer_mot_de_passe()
+        user = User.objects.create_user(password=password_clair, **validated_data)
+        user.is_active = True
+        user.is_staff  = True
+        user.save(update_fields=['is_active', 'is_staff'])
+        try:
+            role_admin = Role.objects.get(name='administrateur')
+            UserRole.objects.get_or_create(user=user, role=role_admin)
+        except Role.DoesNotExist:
+            pass
+        self._envoyer_email_credentials(user, password_clair)
+        return user
+
+    def _envoyer_email_credentials(self, user, password_clair):
+        sujet   = "Compte administrateur créé — Gestion Pharmacie"
+        message = (
+            f"Bonjour {user.first_name} {user.last_name},\n\n"
+            f"Un compte administrateur a été créé pour vous.\n\n"
+            f"Email        : {user.email}\n"
+            f"Mot de passe : {password_clair}\n\n"
+            f"Connectez-vous sur : http://localhost:4200/signin\n\n"
+            f"Cordialement,\nL'équipe Gestion Pharmacie"
+        )
+        send_mail(
+            subject        = sujet,
+            message        = message,
+            from_email     = settings.DEFAULT_FROM_EMAIL,
+            recipient_list = [user.email],
+            fail_silently  = False,
+        )
+
+
+# ── Gestion des comptes par superadmin ────────────────────────────────────────
+
+class UserAdminEditSerializer(serializers.ModelSerializer):
+    """
+    Permet au superadmin de modifier n'importe quel champ utilisateur,
+    y compris le statut (suspended/active).
+    """
+    class Meta:
+        model  = User
+        fields = [
+            'id', 'first_name', 'last_name', 'email', 'telephone',
+            'status', 'is_active', 'is_staff', 'totp_enabled', 'date_joined',
+        ]
+        read_only_fields = ['id', 'date_joined', 'totp_enabled']
+
+
+# ── TOTP serializers (reset password) ────────────────────────────────────────
+
 class TOTPSetupSerializer(serializers.Serializer):
     secret = serializers.CharField(read_only=True)
     uri    = serializers.CharField(read_only=True)

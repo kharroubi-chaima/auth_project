@@ -208,49 +208,49 @@ class ReservationListCreateView(APIView):
             stock      = stock,
             medicament = stock.medicament,
             quantite   = quantite,
+            statut     = 'active',
         )
 
-        # ── SMS au CITOYEN ────────────────────────────────────
+        dispo_apres = stock.quantite_stock - _quantite_reservee(stock)
+        if dispo_apres <= 0 or dispo_apres <= stock.seuil_alerte:
+            try:
+                from stock.sms_service import verifier_et_notifier_stock_virtuel
+                verifier_et_notifier_stock_virtuel(stock, quantite_virtuelle=dispo_apres)
+            except Exception as e:
+                logger.error(f"Erreur notification stock faible/rupture après reservation : {e}")
+
+        # ── Notification au CITOYEN ───────────────────────────
         try:
-            from .sms_service import envoyer_sms, sms_reservation_confirmee
-            tel_citoyen = getattr(request.user, 'telephone', None)
-            if tel_citoyen:
-                msg = sms_reservation_confirmee(
-                    pharmacie_nom   = stock.pharmacie.nom,
-                    medicament_nom  = stock.medicament.nom,
-                    quantite        = quantite,
-                    expire_at       = reservation.expire_at,
-                    citoyen_prenom  = request.user.first_name,
-                )
-                envoyer_sms(tel_citoyen, msg)
-                logger.info(f"SMS citoyen envoye a {tel_citoyen}")
+            from .sms_service import notifier_reservation_confirmee
+            notifier_reservation_confirmee(
+                citoyen_id     = request.user.pk,
+                pharmacie_nom  = stock.pharmacie.nom,
+                medicament_nom = stock.medicament.nom,
+                quantite       = quantite,
+                expire_at      = reservation.expire_at,
+                citoyen_prenom = request.user.first_name,
+            )
         except Exception as e:
-            logger.error(f"Erreur SMS citoyen : {e}")
+            logger.error(f"Erreur notification citoyen : {e}", exc_info=True)
 
-        # ── SMS au PHARMACIEN ─────────────────────────────────
+        # ── Notification au PHARMACIEN ────────────────────────
         try:
-            from .sms_service import envoyer_sms, sms_nouvelle_reservation_pharmacien
-
-            pharmacien     = stock.pharmacie.proprietaire
-            tel_pharmacien = getattr(pharmacien, 'telephone', None)
-
+            from .sms_service import notifier_nouvelle_reservation_pharmacien
+            pharmacien  = stock.pharmacie.proprietaire
             citoyen_nom = (
                 f"{request.user.first_name} {request.user.last_name}".strip()
                 or request.user.email
             )
-
-            if tel_pharmacien:
-                msg_pharmacien = sms_nouvelle_reservation_pharmacien(
-                    citoyen_nom    = citoyen_nom,
-                    medicament_nom = stock.medicament.nom,
-                    quantite       = quantite,
-                    pharmacie_nom  = stock.pharmacie.nom,
-                    expire_at      = reservation.expire_at,
-                )
-                envoyer_sms(tel_pharmacien, msg_pharmacien)
-                logger.info(f"SMS pharmacien envoye a {tel_pharmacien}")
+            notifier_nouvelle_reservation_pharmacien(
+                pharmacien_id  = pharmacien.pk,
+                citoyen_nom    = citoyen_nom,
+                medicament_nom = stock.medicament.nom,
+                quantite       = quantite,
+                pharmacie_nom  = stock.pharmacie.nom,
+                expire_at      = reservation.expire_at,
+            )
         except Exception as e:
-            logger.error(f"Erreur SMS pharmacien : {e}")
+            logger.error(f"Erreur notification pharmacien : {e}")
 
         return Response(
             ReservationSerializer(reservation).data,
@@ -283,20 +283,17 @@ class AnnulerReservationView(APIView):
         reservation.statut = 'annulee'
         reservation.save(update_fields=['statut'])
 
-        # ── SMS annulation ────────────────────────────────────
+        # ── Notification annulation ───────────────────────────
         try:
-            from .sms_service import envoyer_sms, sms_reservation_annulee
-            tel = getattr(reservation.citoyen, 'telephone', None)
-            if tel:
-                msg = sms_reservation_annulee(
-                    medicament_nom = reservation.medicament.nom,
-                    pharmacie_nom  = reservation.stock.pharmacie.nom,
-                    citoyen_prenom = reservation.citoyen.first_name,
-                )
-                envoyer_sms(tel, msg)
-                logger.info(f"SMS annulation envoye a {tel}")
+            from .sms_service import notifier_reservation_annulee
+            notifier_reservation_annulee(
+                citoyen_id     = reservation.citoyen.pk,
+                medicament_nom = reservation.medicament.nom,
+                pharmacie_nom  = reservation.stock.pharmacie.nom,
+                citoyen_prenom = reservation.citoyen.first_name,
+            )
         except Exception as e:
-            logger.error(f"Erreur SMS annulation : {e}")
+            logger.error(f"Erreur notification annulation : {e}")
 
         return Response({'detail': 'Reservation annulee avec succes.'})
 
@@ -341,11 +338,20 @@ class MarquerRecupereeView(APIView):
         med.quantite_stock = max(0, med.quantite_stock - reservation.quantite)
         med.save(update_fields=['quantite_stock'])
 
+        # ── NOUVEAU : Alerte stock faible / rupture vers le pharmacien ──
+        try:
+            from stock.sms_service import verifier_et_notifier_stock
+            stock.refresh_from_db()
+            verifier_et_notifier_stock(stock)
+        except Exception as e:
+            logger.error(f"[Reservation #{pk}] Erreur alerte stock après récupération : {e}")
+
         # ── Marquer récupérée ─────────────────────────────────
         reservation.statut = 'recuperee'
         reservation.save(update_fields=['statut'])
 
         # ── Créer la vente automatiquement ───────────────────
+        citoyen_nom = ''
         try:
             from stock.models import Vente, LigneVente
 
@@ -354,7 +360,6 @@ class MarquerRecupereeView(APIView):
             prix_unitaire = float(stock.prix_vente or med.prix_vente or 0)
             quantite      = reservation.quantite
 
-            citoyen_nom = ''
             if reservation.citoyen:
                 citoyen_nom = (
                     f"{reservation.citoyen.first_name} {reservation.citoyen.last_name}".strip()
@@ -381,21 +386,41 @@ class MarquerRecupereeView(APIView):
         except Exception as e:
             logger.error(f"[Reservation #{pk}] Erreur creation vente automatique : {e}")
 
-        # ── SMS récupération ──────────────────────────────────
+        # ── NOUVEAU : Notification BDD visible en front ───────
         try:
-            from .sms_service import envoyer_sms, sms_reservation_recuperee
-            tel = getattr(reservation.citoyen, 'telephone', None)
-            if tel:
-                msg = sms_reservation_recuperee(
+            from stock.models import Notification
+
+            tel_citoyen = getattr(reservation.citoyen, 'telephone', '') if reservation.citoyen else ''
+            message_notif = (
+                f"Le citoyen {citoyen_nom or 'inconnu'} a récupéré "
+                f"{reservation.quantite}x {reservation.medicament.nom}."
+            )
+
+            Notification.objects.create(
+                pharmacie    = stock.pharmacie,
+                medicament   = reservation.medicament,
+                type         = 'reservation_recuperee',
+                message      = message_notif,
+                statut       = 'envoye',
+                destinataire = tel_citoyen,
+            )
+            logger.info(f"[Reservation #{pk}] Notification BDD créée (reservation_recuperee).")
+        except Exception as e:
+            logger.error(f"[Reservation #{pk}] Erreur création notification BDD récupération : {e}")
+
+        # ── Notification récupération au citoyen ─────────────
+        try:
+            if reservation.citoyen:
+                from .sms_service import notifier_reservation_recuperee
+                notifier_reservation_recuperee(
+                    citoyen_id     = reservation.citoyen.pk,
                     medicament_nom = reservation.medicament.nom,
                     quantite       = reservation.quantite,
                     pharmacie_nom  = reservation.stock.pharmacie.nom,
                     citoyen_prenom = reservation.citoyen.first_name,
                 )
-                envoyer_sms(tel, msg)
-                logger.info(f"SMS recuperation envoye a {tel}")
         except Exception as e:
-            logger.error(f"Erreur SMS recuperation : {e}")
+            logger.error(f"Erreur notification récupération : {e}")
 
         return Response({'detail': 'Recuperation confirmee. Stock mis a jour.'})
 
@@ -406,7 +431,12 @@ class PharmacienReservationsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        pharmacie = request.user.pharmacies.first()
+        from pharmacies.models import Pharmacie
+        pharmacie = Pharmacie.objects.filter(proprietaire=request.user).first()
+         
+         
+        if not pharmacie:
+            pharmacie = request.user.pharmacies_travail.first()  # Tentative de fallback si relation directe non trouvée
 
         if not pharmacie:
             return Response(
@@ -420,7 +450,6 @@ class PharmacienReservationsView(APIView):
 
         return Response(ReservationSerializer(reservations, many=True).data)
 
-
 # ── Historique citoyen ────────────────────────────────────────────────────────
 
 class HistoriqueReservationsView(APIView):
@@ -431,4 +460,48 @@ class HistoriqueReservationsView(APIView):
         qs = Reservation.objects.filter(
             citoyen=request.user
         ).select_related('stock__pharmacie', 'medicament').order_by('-created_at')
+        return Response(ReservationSerializer(qs, many=True).data)
+    
+
+class HistoriqueReservationsProprietaireView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from pharmacies.models import Pharmacie
+
+        # Récupérer la pharmacie du propriétaire
+        pharmacie = Pharmacie.objects.filter(proprietaire=request.user).first()
+        if not pharmacie:
+            return Response(
+                {'detail': 'Accès réservé au propriétaire.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        qs = Reservation.objects.filter(
+            stock__pharmacie=pharmacie
+        ).select_related('stock__pharmacie', 'medicament', 'citoyen')
+
+        # ── Filtre par date ───────────────────────────────────
+        date_debut = request.query_params.get('date_debut')
+        date_fin   = request.query_params.get('date_fin')
+        if date_debut:
+            qs = qs.filter(created_at__date__gte=date_debut)
+        if date_fin:
+            qs = qs.filter(created_at__date__lte=date_fin)
+
+        # ── Filtre par citoyen (nom ou email) ─────────────────
+        """citoyen_q = request.query_params.get('citoyen', '').strip()
+        if citoyen_q:
+            qs = qs.filter(
+                models.Q(citoyen__first_name__icontains=citoyen_q) |
+                models.Q(citoyen__last_name__icontains=citoyen_q)  |
+                models.Q(citoyen__email__icontains=citoyen_q)
+            )"""
+
+        # ── Filtre par statut ─────────────────────────────────
+        statut = request.query_params.get('statut', '').strip()
+        if statut:
+            qs = qs.filter(statut=statut)
+
+        qs = qs.order_by('-created_at')
         return Response(ReservationSerializer(qs, many=True).data)

@@ -70,18 +70,18 @@ class DemandeUrgenteProchesView(APIView):
             expire_at__gt=timezone.now()
         ).select_related('citoyen')
 
-        Pharmacie = apps.get_model('pharmacies', 'Pharmacie')
-
         resultats = []
         for d in demandes:
             if d.lat is None or d.lng is None:
                 continue
 
-            # distance entre pharmacien et demande
             import math
             dlat = math.radians(float(d.lat) - lat)
             dlng = math.radians(float(d.lng) - lng)
-            a = math.sin(dlat/2)**2 + math.cos(math.radians(lat)) * math.cos(math.radians(float(d.lat))) * math.sin(dlng/2)**2
+            a = (math.sin(dlat/2)**2
+                 + math.cos(math.radians(lat))
+                 * math.cos(math.radians(float(d.lat)))
+                 * math.sin(dlng/2)**2)
             dist = 6371 * 2 * math.asin(math.sqrt(a))
 
             if dist <= rayon:
@@ -100,7 +100,10 @@ class RepondreDemandeView(APIView):
         try:
             demande = DemandeUrgente.objects.get(pk=pk, statut='en_attente')
         except DemandeUrgente.DoesNotExist:
-            return Response({'detail': 'Demande introuvable ou déjà traitée.'}, status=404)
+            return Response(
+                {'detail': 'Demande introuvable ou déjà traitée.'},
+                status=404
+            )
 
         action = request.data.get('action')
         if action not in ('accepter', 'refuser'):
@@ -111,17 +114,22 @@ class RepondreDemandeView(APIView):
             demande.save(update_fields=['statut'])
             return Response({'detail': 'Demande expirée.'}, status=400)
 
+        # ── Statut ────────────────────────────────────────────────────────────
         demande.statut = 'acceptee' if action == 'accepter' else 'refusee'
 
-        # ✅ Fix : récupérer la pharmacie correctement
-        try:
-            from pharmacies.models import Pharmacie
-            pharmacie = Pharmacie.objects.get(proprietaire=request.user)
-            demande.pharmacie = pharmacie
-        except Exception:
-            demande.pharmacie = None
+        # ── Assigner la pharmacie du pharmacien connecté ──────────────────────
+        pharmacie = Pharmacie.objects.filter(proprietaire=request.user).first()
+        if not pharmacie:
+            try:
+                pharmacie = request.user.pharmacies_travail.first()
+            except Exception:
+                pharmacie = None
 
+        demande.pharmacie = pharmacie
+
+        # ── SAVE (manquait dans la version précédente → 500) ──────────────────
         demande.save(update_fields=['statut', 'pharmacie'])
+
         return Response(DemandeUrgenteSerializer(demande).data)
 
 
@@ -136,21 +144,28 @@ class AnnulerDemandeView(APIView):
             return Response({'detail': 'Demande introuvable.'}, status=404)
 
         if demande.statut != 'en_attente':
-            return Response({'detail': f'Demande déjà {demande.statut}.'}, status=400)
+            return Response(
+                {'detail': f'Demande déjà {demande.statut}.'},
+                status=400
+            )
 
         demande.statut = 'refusee'
         demande.save(update_fields=['statut'])
         return Response({'detail': 'Demande annulée.'})
-    
+
+
 class HistoriquePharmacienView(APIView):
     """GET /api/urgences/historique/ — Demandes traitées par cette pharmacie"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        try:
-            from pharmacies.models import Pharmacie
-            pharmacie = Pharmacie.objects.get(proprietaire=request.user)
-        except Exception:
+        pharmacie = Pharmacie.objects.filter(proprietaire=request.user).first()
+        if not pharmacie:
+            try:
+                pharmacie = request.user.pharmacies_travail.first()
+            except Exception:
+                pharmacie = None
+        if not pharmacie:
             return Response({'detail': 'Pharmacie introuvable.'}, status=404)
 
         qs = DemandeUrgente.objects.filter(

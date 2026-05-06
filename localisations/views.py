@@ -18,6 +18,7 @@ class DelegationViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Delegation.objects.select_related('gouvernorat').all()
     serializer_class = DelegationSerializer
     permission_classes = [AllowAny]
+    #deux type de recherche : par gouvernorat ou par nom de delegation
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['gouvernorat']
     search_fields = ['nom']
