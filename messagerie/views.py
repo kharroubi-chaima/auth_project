@@ -415,6 +415,7 @@ class PharmaciesDisponiblesView(APIView):
                     "adresse": p.adresse,
                     "telephone": p.telephone,
                     "en_ligne": en_ligne,
+                    "proprietaire_id": str(p.proprietaire_id) if p.proprietaire_id else None,
                 }
             )
         return Response(data)
