@@ -498,7 +498,7 @@ class DemandesSuspensionViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Accès refusé.'}, status=403)
 
         demande = self.get_object()
-        nouveau_statut = request.data.get('statut')   # 'approuvee' | 'refusee'
+        nouveau_statut = request.data.get('statut')   
         commentaire    = request.data.get('commentaire', '')
 
         if nouveau_statut not in ('approuvee', 'refusee'):
@@ -510,7 +510,6 @@ class DemandesSuspensionViewSet(viewsets.ModelViewSet):
         demande.date_traitement         = timezone.now()
         demande.save()
 
-        # Si approuvée → mettre la pharmacie en suspension (inactive)
         if nouveau_statut == 'approuvee':
             demande.pharmacie.est_active = False
             demande.pharmacie.save()
@@ -737,6 +736,7 @@ class HoraireViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['pharmacie', 'pharmacie__delegation__gouvernorat']
+    pagination_class= None
 
     def get_queryset(self):
         user = self.request.user

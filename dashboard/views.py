@@ -34,9 +34,11 @@ class KPIGenerauxView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        print(f"DEBUG: KPIGenerauxView hit by user {request.user}")
         pharmacie = get_pharmacie(request.user)
         if not pharmacie:
-            return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+            print(f"DEBUG: No pharmacie found for user {request.user}")
+            return Response({'detail': f'Aucune pharmacie trouvée pour l\'utilisateur {request.user.email}.'}, status=404)
 
         today = date.today()
         now   = timezone.now()
@@ -104,9 +106,11 @@ class VentesJournalieresView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        print(f"DEBUG: View hit by {request.user}")
         pharmacie = get_pharmacie(request.user)
         if not pharmacie:
-            return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+            print(f"DEBUG: No pharmacie found for {request.user}")
+            return Response({'detail': f'Aucune pharmacie trouvée pour {request.user.email}.'}, status=404)
 
         try:
             period = int(request.query_params.get('period', 7))
@@ -145,9 +149,11 @@ class ReservationsStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        print(f"DEBUG: View hit by {request.user}")
         pharmacie = get_pharmacie(request.user)
         if not pharmacie:
-            return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+            print(f"DEBUG: No pharmacie found for {request.user}")
+            return Response({'detail': f'Aucune pharmacie trouvée pour {request.user.email}.'}, status=404)
 
         debut = timezone.now() - timedelta(days=30)
 
@@ -189,9 +195,11 @@ class DemandesStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        print(f"DEBUG: View hit by {request.user}")
         pharmacie = get_pharmacie(request.user)
         if not pharmacie:
-            return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+            print(f"DEBUG: No pharmacie found for {request.user}")
+            return Response({'detail': f'Aucune pharmacie trouvée pour {request.user.email}.'}, status=404)
 
         debut_mois = date.today().replace(day=1)
 
@@ -239,9 +247,11 @@ class AlertesStockView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        print(f"DEBUG: View hit by {request.user}")
         pharmacie = get_pharmacie(request.user)
         if not pharmacie:
-            return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+            print(f"DEBUG: No pharmacie found for {request.user}")
+            return Response({'detail': f'Aucune pharmacie trouvée pour {request.user.email}.'}, status=404)
 
         today            = date.today()
         expiration_seuil = today + timedelta(days=30)

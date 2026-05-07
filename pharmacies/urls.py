@@ -11,14 +11,13 @@ from .views import (
 )
 
 router = DefaultRouter()
-# Changer le préfixe du router pour les gardes
 router.register(r'pharmacies',               PharmacieViewSet,          basename='pharmacie')
 router.register(r'admin/pharmacies',         PharmacieAdminViewSet,     basename='pharmacie-admin')
 router.register(r'superadmin/pharmacies',    SuperAdminPharmacieViewSet,basename='superadmin-pharmacie')
 router.register(r'jours-feries-crud',        JourFerieViewSet,          basename='jour-ferie')
 router.register(r'periodes-ramadan',         PeriodeRamadanViewSet,     basename='periode-ramadan')
 router.register(r'admin/demande-suspension', DemandesSuspensionViewSet, basename='suspensions')
-router.register(r'gardes',                   GardePharmacieViewSet,     basename='gardes')  # ← plus de préfixe 'pharmacies/'
+router.register(r'gardes',                   GardePharmacieViewSet,     basename='gardes')
 router.register(r'horaires',                 HoraireViewSet,            basename='horaires')
 router.register(r'horaires-ramadan',         HoraireRamadanViewSet,     basename='horaires-ramadan')
 
@@ -36,6 +35,4 @@ urlpatterns = [
     path('periodes-ramadan-list/',                     periodes_ramadan,   name='periodes-ramadan-list'),
     path('dashboard/stats/',                           dashboard_stats,    name='dashboard-stats'),
     path('', include(router.urls)),
-
-
 ]

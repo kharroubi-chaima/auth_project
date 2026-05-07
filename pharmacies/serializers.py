@@ -235,6 +235,9 @@ class DemandesSuspensionSerializer(serializers.ModelSerializer):
     demandeur_nom = serializers.CharField(
         source="demandeur.get_full_name", read_only=True
     )
+    traite_par_nom = serializers.CharField(
+        source="traite_par.get_full_name", read_only=True
+    )
 
     class Meta:
         model = DemandesSuspension
@@ -247,8 +250,10 @@ class DemandesSuspensionSerializer(serializers.ModelSerializer):
             "statut",
             "date_demande",
             "commentaire_superadmin",
+            "date_traitement",
+            "traite_par_nom",
         ]
-        read_only_fields = ["statut", "date_demande", "pharmacie"]
+        read_only_fields = ["statut", "date_demande", "pharmacie", "date_traitement", "traite_par_nom"]
 
 
 class GardePharmacieSerializer(serializers.ModelSerializer):
