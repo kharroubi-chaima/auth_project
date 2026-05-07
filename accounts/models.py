@@ -44,6 +44,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         blank=True,
         related_name='pharmaciens',
     )
+    face_encoding = models.JSONField(null=True, blank=True)
+
 
     objects = UserManager()
 

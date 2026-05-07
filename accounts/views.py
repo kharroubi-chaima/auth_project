@@ -26,7 +26,149 @@ from .serializers import (
 )
 from .permissions import HasPermission, IsOwnerOrAdmin, IsSuperAdmin, IsAdminOrSuperAdmin
 
+import uuid
+import base64
+from django.core.files.base import ContentFile
+try:
+    import face_recognition
+    FACE_REC_LIB_AVAILABLE = True
+except ImportError:
+    FACE_REC_LIB_AVAILABLE = False
+
+try:
+    import cv2
+    import numpy as np
+    FACE_REC_AVAILABLE = True
+except ImportError:
+    FACE_REC_AVAILABLE = False
+
+import os
+HAAR_CASCADE_PATH = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml') if FACE_REC_AVAILABLE else None
+
 User = get_user_model()
+
+
+# ── Face Recognition Login ──────────────────────────────────────────────────
+
+class FaceLoginView(APIView):
+    permission_classes     = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        if not FACE_REC_AVAILABLE:
+            return Response({'error': 'La reconnaissance faciale n\'est pas configurée sur le serveur.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        email = request.data.get('email')
+        image_data = request.data.get('image')
+
+        if not image_data:
+            return Response({'error': 'Image requise.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Decode base64 image
+            format, imgstr = image_data.split(';base64,')
+            img_bytes = base64.b64decode(imgstr)
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            target_user = None
+
+            if email:
+                try:
+                    target_user = User.objects.get(email=email)
+                except User.DoesNotExist:
+                    return Response({'error': 'Utilisateur introuvable.'}, status=status.HTTP_404_NOT_FOUND)
+                
+                if not target_user.face_encoding:
+                    return Response({'error': 'Aucun visage enregistré pour ce compte.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if FACE_REC_LIB_AVAILABLE:
+                rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                face_encodings = face_recognition.face_encodings(rgb_img)
+
+                if not face_encodings:
+                    return Response({'error': 'Aucun visage détecté.'}, status=status.HTTP_400_BAD_REQUEST)
+
+                current_encoding = face_encodings[0]
+
+                if target_user:
+                    matches = face_recognition.compare_faces([np.array(target_user.face_encoding)], current_encoding)
+                    if matches[0]: login_user = target_user
+                    else: login_user = None
+                else:
+                    # Global search
+                    users_with_faces = User.objects.exclude(face_encoding__isnull=True).exclude(face_encoding=[])
+                    all_encodings = []
+                    user_map = []
+                    for u in users_with_faces:
+                        if isinstance(u.face_encoding, list):
+                            all_encodings.append(np.array(u.face_encoding))
+                            user_map.append(u)
+                    
+                    if all_encodings:
+                        matches = face_recognition.compare_faces(all_encodings, current_encoding, tolerance=0.5)
+                        if True in matches:
+                            login_user = user_map[matches.index(True)]
+                        else: login_user = None
+                    else: login_user = None
+            else:
+                # Fallback: OpenCV
+                face_cascade = cv2.CascadeClassifier(HAAR_CASCADE_PATH)
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+                if len(faces) == 0:
+                    return Response({'error': 'Aucun visage détecté.'}, status=status.HTTP_400_BAD_REQUEST)
+
+                (x, y, w, h) = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)[0]
+                face_roi = gray[y:y+h, x:x+w]
+                face_roi = cv2.resize(face_roi, (100, 100))
+
+                login_user = None
+                
+                if target_user:
+                    users_to_check = [target_user]
+                else:
+                    users_to_check = User.objects.exclude(face_encoding__isnull=True)
+
+                for u in users_to_check:
+                    if isinstance(u.face_encoding, dict) and "opencv_face" in u.face_encoding:
+                        stored_face_bytes = base64.b64decode(u.face_encoding["opencv_face"])
+                        stored_nparr = np.frombuffer(stored_face_bytes, np.uint8)
+                        stored_face = cv2.imdecode(stored_nparr, cv2.IMREAD_GRAYSCALE)
+                        stored_face = cv2.resize(stored_face, (100, 100))
+
+                        result = cv2.matchTemplate(face_roi, stored_face, cv2.TM_CCOEFF_NORMED)
+                        _, max_val, _, _ = cv2.minMaxLoc(result)
+                        if max_val > 0.7:
+                            login_user = u
+                            break
+
+            if login_user:
+                refresh = RefreshToken.for_user(login_user)
+                data = {
+                    'access': str(refresh.access_token),
+                    'refresh': str(refresh),
+                    'user': {
+                        'id'          : str(login_user.id),
+                        'email'       : login_user.email,
+                        'first_name'  : login_user.first_name,
+                        'last_name'   : login_user.last_name,
+                        'is_staff'    : login_user.is_staff,
+                        'totp_enabled': login_user.totp_enabled,
+                        'status'      : login_user.status,
+                        'roles'       : list(login_user.roles.values_list('name', flat=True)),
+                    }
+                }
+                response = Response(data)
+                response.set_cookie('access_token',  data['access'], httponly=False, samesite='Lax', secure=False, path='/')
+                response.set_cookie('refresh_token', data['refresh'], httponly=True, samesite='Lax', secure=False, path='/')
+                return response
+            else:
+                return Response({'error': 'Visage non reconnu.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        except Exception as e:
+            return Response({'error': f'Erreur: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ── JWT custom ────────────────────────────────────────────────────────────────
@@ -76,7 +218,7 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         response = super().post(request, *args, **kwargs)
         if response.status_code == 200:
             response.set_cookie('access_token',  response.data['access'],
-                                httponly=True, samesite='Lax', secure=False, path='/')
+                                httponly=False, samesite='Lax', secure=False, path='/')
             response.set_cookie('refresh_token', response.data['refresh'],
                                 httponly=True, samesite='Lax', secure=False, path='/')
         return response
@@ -261,6 +403,60 @@ class UserViewSet(viewsets.ModelViewSet):
         user.totp_secret  = None
         user.save(update_fields=['totp_enabled', 'totp_secret'])
         return Response({'status': 'TOTP désactivé.'})
+    
+    @action(detail=False, methods=['post'], url_path='face-enroll')
+    def face_enroll(self, request):
+        if not FACE_REC_AVAILABLE:
+            return Response({'error': 'La reconnaissance faciale n\'est pas configurée sur le serveur.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        image_data = request.data.get('image') # Base64 string
+        if not image_data:
+            return Response({'error': 'Image requise.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            format, imgstr = image_data.split(';base64,')
+            img_bytes = base64.b64decode(imgstr)
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            user = request.user
+
+            if FACE_REC_LIB_AVAILABLE:
+                # Use face_recognition
+                rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                face_encodings = face_recognition.face_encodings(rgb_img)
+
+                if not face_encodings:
+                    return Response({'error': 'Aucun visage détecté.'}, status=status.HTTP_400_BAD_REQUEST)
+
+                user.face_encoding = face_encodings[0].tolist()
+            else:
+                # Fallback: Detect face with OpenCV and store the face ROI itself
+                face_cascade = cv2.CascadeClassifier(HAAR_CASCADE_PATH)
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+                if len(faces) == 0:
+                    return Response({'error': 'Aucun visage détecté.'}, status=status.HTTP_400_BAD_REQUEST)
+
+                # Get largest face
+                (x, y, w, h) = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)[0]
+                face_roi = gray[y:y+h, x:x+w]
+                face_roi = cv2.resize(face_roi, (100, 100))
+
+                _, buffer = cv2.imencode('.jpg', face_roi)
+                face_base64 = base64.b64encode(buffer).decode('utf-8')
+
+                user.face_encoding = {
+                    "type": "opencv",
+                    "opencv_face": face_base64
+                }
+
+            user.save(update_fields=['face_encoding'])
+            return Response({'status': 'Visage enregistré avec succès.'})
+
+        except Exception as e:
+            return Response({'error': f'Erreur: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ── SuperAdmin — gestion des administrateurs ──────────────────────────────────

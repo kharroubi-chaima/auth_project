@@ -158,6 +158,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         await self.accept()
         
         # Marquer l'utilisateur en ligne globalement
+        print(f"User {self.user.email} CONNECTED to Notifications")
         await self.set_presence(self.user, True)
         await self.diffuser_presence(True)
         
@@ -170,6 +171,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         try:
             if hasattr(self, 'user') and not self.user.is_anonymous:
                 # Marquer l'utilisateur hors ligne globalement
+                print(f"User {self.user.email} DISCONNECTED from Notifications")
                 await self.set_presence(self.user, False)
                 await self.diffuser_presence(False)
                 
@@ -180,6 +182,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     async def diffuser_presence(self, en_ligne):
         try:
+            print(f"Diffusing presence: {self.user.email} -> {'Online' if en_ligne else 'Offline'}")
             await self.channel_layer.group_send(
                 'global_presence',
                 {
@@ -188,7 +191,8 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                     'en_ligne': en_ligne
                 }
             )
-        except: pass
+        except Exception as e:
+            print(f"Error diffusing presence: {e}")
 
     async def presence_change(self, event):
         try:

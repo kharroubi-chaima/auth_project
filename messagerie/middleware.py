@@ -11,7 +11,8 @@ def get_user(token):
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
         return User.objects.get(id=payload['user_id'])
-    except Exception:
+    except Exception as e:
+        print(f"JWT Decode Error: {e}")
         return AnonymousUser()
 
 
@@ -36,5 +37,9 @@ class JWTAuthMiddleware:
                     token = part.split('=', 1)[1]
                     break
             scope['user'] = await get_user(token) if token else AnonymousUser()
+            if scope['user'].is_anonymous:
+                print(f"WS Connection REJECTED: User is Anonymous (Token: {token[:10] if token else 'None'}...)")
+            else:
+                print(f"WS Connection ACCEPTED: User {scope['user'].email}")
 
         return await self.app(scope, receive, send)
