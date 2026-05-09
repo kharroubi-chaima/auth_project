@@ -1,4 +1,7 @@
 # accounts/views.py
+import os
+import base64
+
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -26,24 +29,35 @@ from .serializers import (
 )
 from .permissions import HasPermission, IsOwnerOrAdmin, IsSuperAdmin, IsAdminOrSuperAdmin
 
-import uuid
-import base64
-from django.core.files.base import ContentFile
-try:
-    import face_recognition
-    FACE_REC_LIB_AVAILABLE = True
-except ImportError:
-    FACE_REC_LIB_AVAILABLE = False
+# ── Disponibilité des librairies de reconnaissance faciale ───────────────────
+
+# Singleton/Lazy loader pour DeepFace (évite de recharger TF à chaque requête)
+_DEEPFACE_CACHE = None
+
+def get_deepface():
+    global _DEEPFACE_CACHE
+    if _DEEPFACE_CACHE is not None:
+        return _DEEPFACE_CACHE
+    try:
+        from deepface import DeepFace
+        # On force le build du modèle au premier appel pour "payer" la latence une seule fois
+        DeepFace.build_model("VGG-Face")
+        _DEEPFACE_CACHE = DeepFace
+        return _DEEPFACE_CACHE
+    except Exception as e:
+        print(f"Erreur d'importation DeepFace : {e}")
+        return None
 
 try:
     import cv2
     import numpy as np
-    FACE_REC_AVAILABLE = True
+    CV2_AVAILABLE = True
 except ImportError:
-    FACE_REC_AVAILABLE = False
+    CV2_AVAILABLE = False
 
-import os
-HAAR_CASCADE_PATH = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml') if FACE_REC_AVAILABLE else None
+FACE_REC_AVAILABLE = True # On vérifiera get_deepface() dynamiquement
+
+HAAR_CASCADE_PATH = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml') if CV2_AVAILABLE else None
 
 User = get_user_model()
 
@@ -58,98 +72,77 @@ class FaceLoginView(APIView):
         if not FACE_REC_AVAILABLE:
             return Response({'error': 'La reconnaissance faciale n\'est pas configurée sur le serveur.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        email = request.data.get('email')
+        email      = request.data.get('email')
         image_data = request.data.get('image')
 
         if not image_data:
             return Response({'error': 'Image requise.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Decode base64 image
-            format, imgstr = image_data.split(';base64,')
+            # Décoder l'image base64
+            if ';base64,' in image_data:
+                _, imgstr = image_data.split(';base64,')
+            else:
+                imgstr = image_data
             img_bytes = base64.b64decode(imgstr)
-            nparr = np.frombuffer(img_bytes, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            nparr     = np.frombuffer(img_bytes, np.uint8)
+            img       = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-            target_user = None
+            if img is None:
+                return Response({'error': 'Image invalide.'}, status=status.HTTP_400_BAD_REQUEST)
 
+            login_user  = None
+            DeepFace = get_deepface()
+
+            if not DeepFace:
+                return Response({'error': 'DeepFace non disponible.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+            # 1. Si un email est fourni, on vérifie uniquement cet utilisateur
             if email:
                 try:
                     target_user = User.objects.get(email=email)
+                    if not target_user.face_encoding:
+                        return Response({'error': 'Aucun visage enregistré pour ce compte.'}, status=status.HTTP_400_BAD_REQUEST)
+                    
+                    stored_data = target_user.face_encoding
+                    if isinstance(stored_data, dict) and "opencv_face" in stored_data:
+                        stored_face_bytes = base64.b64decode(stored_data["opencv_face"])
+                        stored_nparr      = np.frombuffer(stored_face_bytes, np.uint8)
+                        stored_img        = cv2.imdecode(stored_nparr, cv2.IMREAD_COLOR)
+
+                        result = DeepFace.verify(img, stored_img, enforce_detection=False, model_name="VGG-Face")
+                        if result['verified'] and result['distance'] < 0.55:
+                            login_user = target_user
                 except User.DoesNotExist:
                     return Response({'error': 'Utilisateur introuvable.'}, status=status.HTTP_404_NOT_FOUND)
-                
-                if not target_user.face_encoding:
-                    return Response({'error': 'Aucun visage enregistré pour ce compte.'}, status=status.HTTP_400_BAD_REQUEST)
+                except Exception as e:
+                    print(f"DeepFace verify error: {e}")
 
-            if FACE_REC_LIB_AVAILABLE:
-                rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                face_encodings = face_recognition.face_encodings(rgb_img)
+            # 2. Si pas d'email ou si la vérification ciblée a échoué, on cherche dans TOUTE la base (si e-mail non imposé)
+            if not login_user and not email:
+                users_with_face = User.objects.exclude(face_encoding__isnull=True)
+                for u in users_with_face:
+                    try:
+                        stored_data = u.face_encoding
+                        if isinstance(stored_data, dict) and "opencv_face" in stored_data:
+                            stored_face_bytes = base64.b64decode(stored_data["opencv_face"])
+                            stored_nparr      = np.frombuffer(stored_face_bytes, np.uint8)
+                            stored_img        = cv2.imdecode(stored_nparr, cv2.IMREAD_COLOR)
 
-                if not face_encodings:
-                    return Response({'error': 'Aucun visage détecté.'}, status=status.HTTP_400_BAD_REQUEST)
-
-                current_encoding = face_encodings[0]
-
-                if target_user:
-                    matches = face_recognition.compare_faces([np.array(target_user.face_encoding)], current_encoding)
-                    if matches[0]: login_user = target_user
-                    else: login_user = None
-                else:
-                    # Global search
-                    users_with_faces = User.objects.exclude(face_encoding__isnull=True).exclude(face_encoding=[])
-                    all_encodings = []
-                    user_map = []
-                    for u in users_with_faces:
-                        if isinstance(u.face_encoding, list):
-                            all_encodings.append(np.array(u.face_encoding))
-                            user_map.append(u)
-                    
-                    if all_encodings:
-                        matches = face_recognition.compare_faces(all_encodings, current_encoding, tolerance=0.5)
-                        if True in matches:
-                            login_user = user_map[matches.index(True)]
-                        else: login_user = None
-                    else: login_user = None
-            else:
-                # Fallback: OpenCV
-                face_cascade = cv2.CascadeClassifier(HAAR_CASCADE_PATH)
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-
-                if len(faces) == 0:
-                    return Response({'error': 'Aucun visage détecté.'}, status=status.HTTP_400_BAD_REQUEST)
-
-                (x, y, w, h) = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)[0]
-                face_roi = gray[y:y+h, x:x+w]
-                face_roi = cv2.resize(face_roi, (100, 100))
-
-                login_user = None
-                
-                if target_user:
-                    users_to_check = [target_user]
-                else:
-                    users_to_check = User.objects.exclude(face_encoding__isnull=True)
-
-                for u in users_to_check:
-                    if isinstance(u.face_encoding, dict) and "opencv_face" in u.face_encoding:
-                        stored_face_bytes = base64.b64decode(u.face_encoding["opencv_face"])
-                        stored_nparr = np.frombuffer(stored_face_bytes, np.uint8)
-                        stored_face = cv2.imdecode(stored_nparr, cv2.IMREAD_GRAYSCALE)
-                        stored_face = cv2.resize(stored_face, (100, 100))
-
-                        result = cv2.matchTemplate(face_roi, stored_face, cv2.TM_CCOEFF_NORMED)
-                        _, max_val, _, _ = cv2.minMaxLoc(result)
-                        if max_val > 0.7:
-                            login_user = u
-                            break
+                            # On utilise un seuil de vérification strict pour éviter les faux positifs
+                            result = DeepFace.verify(img, stored_img, enforce_detection=False, model_name="VGG-Face")
+                            if result['verified']:
+                                login_user = u
+                                break
+                    except Exception as loop_e:
+                        continue
 
             if login_user:
                 refresh = RefreshToken.for_user(login_user)
-                data = {
-                    'access': str(refresh.access_token),
+                data    = {
+                    'access' : str(refresh.access_token),
                     'refresh': str(refresh),
-                    'user': {
+                    'user'   : {
                         'id'          : str(login_user.id),
                         'email'       : login_user.email,
                         'first_name'  : login_user.first_name,
@@ -161,13 +154,15 @@ class FaceLoginView(APIView):
                     }
                 }
                 response = Response(data)
-                response.set_cookie('access_token',  data['access'], httponly=False, samesite='Lax', secure=False, path='/')
-                response.set_cookie('refresh_token', data['refresh'], httponly=True, samesite='Lax', secure=False, path='/')
+                response.set_cookie('access_token',  data['access'],  httponly=False, samesite='Lax', secure=False, path='/')
+                response.set_cookie('refresh_token', data['refresh'], httponly=True,  samesite='Lax', secure=False, path='/')
                 return response
             else:
                 return Response({'error': 'Visage non reconnu.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return Response({'error': f'Erreur: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -210,8 +205,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
-    serializer_class   = CustomTokenObtainPairSerializer
-    permission_classes = [AllowAny]
+    serializer_class       = CustomTokenObtainPairSerializer
+    permission_classes     = [AllowAny]
     authentication_classes = []
 
     def post(self, request, *args, **kwargs):
@@ -232,10 +227,8 @@ class UserViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action == 'create':
-            # Inscription publique citoyen — sans TOTP
             self.permission_classes = [AllowAny]
         elif self.action == 'create_pharmacien':
-            # Admin ou superadmin peut créer un pharmacien
             self.permission_classes = [IsAdminOrSuperAdmin]
         elif self.action == 'list':
             self.permission_classes = [IsAdminOrSuperAdmin]
@@ -252,7 +245,6 @@ class UserViewSet(viewsets.ModelViewSet):
         elif self.action == 'roles':
             self.permission_classes = [IsAdminOrSuperAdmin]
         elif self.action in ['totp_setup', 'totp_verify', 'totp_disable']:
-            # TOTP disponible mais non obligatoire
             self.permission_classes = [IsAuthenticated]
         elif self.action == 'suspend':
             self.permission_classes = [IsAdminOrSuperAdmin]
@@ -267,15 +259,15 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def me(self, request):
         user = request.user
-        return Response ({
-            'id' : str(user.id),
-            'email' : user.email,
-            'last_name' : user.last_name,
-            'first_name' : user.first_name,
-            'is_staff' : user.is_staff,
-            'totp_enabled' : user.totp_enabled,
-            'status' : user.status,
-            'roles' : list(user.roles.values_list('name', flat=True)),
+        return Response({
+            'id'          : str(user.id),
+            'email'       : user.email,
+            'last_name'   : user.last_name,
+            'first_name'  : user.first_name,
+            'is_staff'    : user.is_staff,
+            'totp_enabled': user.totp_enabled,
+            'status'      : user.status,
+            'roles'       : list(user.roles.values_list('name', flat=True)),
         })
 
     @action(detail=False, methods=['put', 'patch'], url_path='me/update')
@@ -286,22 +278,22 @@ class UserViewSet(viewsets.ModelViewSet):
             serializer.save()
             return Response({'status': 'Profil mis à jour.', 'data': serializer.data})
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     @action(detail=False, methods=['post'], url_path='change-password')
     def change_password(self, request):
         serializer = ChangePasswordSerializer(data=request.data)
         if not serializer.is_valid():
-            return Response( serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         user = request.user
-        
         if not user.check_password(serializer.validated_data['ancien_password']):
             return Response(
-                {'error': 'Ancien mot de passe incorrect.'}, 
+                {'error': 'Ancien mot de passe incorrect.'},
                 status=status.HTTP_400_BAD_REQUEST
-                )
+            )
         user.set_password(serializer.validated_data['nouveau_password'])
         user.save()
         return Response({'status': 'Mot de passe changé avec succès.'})
+
     # ── Création pharmacien (admin/superadmin) ────────────────────────────────
 
     @action(detail=False, methods=['post'])
@@ -348,22 +340,20 @@ class UserViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def suspend(self, request, pk=None):
-        user = self.get_object()
+        user        = self.get_object()
         user.status = 'suspended'
         user.save(update_fields=['status'])
         return Response({'status': f'Compte {user.email} suspendu.'})
 
     @action(detail=True, methods=['post'])
     def activate(self, request, pk=None):
-        user = self.get_object()
+        user           = self.get_object()
         user.status    = 'active'
         user.is_active = True
         user.save(update_fields=['status', 'is_active'])
         return Response({'status': f'Compte {user.email} activé.'})
 
     # ── TOTP (optionnel — setup / disable) ───────────────────────────────────
-    # Le TOTP n'est plus requis à l'inscription.
-    # Il est utilisé uniquement lors du reset password si activé.
 
     @action(detail=False, methods=['post'])
     def totp_setup(self, request):
@@ -403,54 +393,51 @@ class UserViewSet(viewsets.ModelViewSet):
         user.totp_secret  = None
         user.save(update_fields=['totp_enabled', 'totp_secret'])
         return Response({'status': 'TOTP désactivé.'})
-    
+
+    # ── Enregistrement du visage ──────────────────────────────────────────────
+
     @action(detail=False, methods=['post'], url_path='face-enroll')
     def face_enroll(self, request):
         if not FACE_REC_AVAILABLE:
             return Response({'error': 'La reconnaissance faciale n\'est pas configurée sur le serveur.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        image_data = request.data.get('image') # Base64 string
+        image_data = request.data.get('image')
         if not image_data:
             return Response({'error': 'Image requise.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            format, imgstr = image_data.split(';base64,')
+            _, imgstr = image_data.split(';base64,')
             img_bytes = base64.b64decode(imgstr)
-            nparr = np.frombuffer(img_bytes, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
+            nparr     = np.frombuffer(img_bytes, np.uint8)
+            img       = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
             user = request.user
+            DeepFace = get_deepface()
+            
+            if not DeepFace:
+                 return Response({'error': 'DeepFace non disponible.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-            if FACE_REC_LIB_AVAILABLE:
-                # Use face_recognition
-                rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                face_encodings = face_recognition.face_encodings(rgb_img)
+            try:
+                # On utilise DeepFace pour extraire et normaliser le visage
+                faces = DeepFace.extract_faces(img, enforce_detection=True)
+                if faces:
+                    # DeepFace retourne des visages normalisés [0, 1] en RGB
+                    face_img = faces[0]['face']
+                    face_img = (face_img * 255).astype(np.uint8)
+                    face_img = cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR)
 
-                if not face_encodings:
+                    _, buffer    = cv2.imencode('.jpg', face_img)
+                    face_base64  = base64.b64encode(buffer).decode('utf-8')
+
+                    user.face_encoding = {
+                        "type"       : "deepface",
+                        "opencv_face": face_base64
+                    }
+                else:
                     return Response({'error': 'Aucun visage détecté.'}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                return Response({'error': f'Erreur détection: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
-                user.face_encoding = face_encodings[0].tolist()
-            else:
-                # Fallback: Detect face with OpenCV and store the face ROI itself
-                face_cascade = cv2.CascadeClassifier(HAAR_CASCADE_PATH)
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-
-                if len(faces) == 0:
-                    return Response({'error': 'Aucun visage détecté.'}, status=status.HTTP_400_BAD_REQUEST)
-
-                # Get largest face
-                (x, y, w, h) = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)[0]
-                face_roi = gray[y:y+h, x:x+w]
-                face_roi = cv2.resize(face_roi, (100, 100))
-
-                _, buffer = cv2.imencode('.jpg', face_roi)
-                face_base64 = base64.b64encode(buffer).decode('utf-8')
-
-                user.face_encoding = {
-                    "type": "opencv",
-                    "opencv_face": face_base64
-                }
 
             user.save(update_fields=['face_encoding'])
             return Response({'status': 'Visage enregistré avec succès.'})
@@ -473,17 +460,21 @@ class SuperAdminUserViewSet(viewsets.ModelViewSet):
     permission_classes = [IsSuperAdmin]
 
     def get_queryset(self):
-        role_filter = self.request.query_params.get('role')
+        role_filter   = self.request.query_params.get('role')
         status_filter = self.request.query_params.get('status')
-        search = self.request.query_params.get('search')
-        qs = User.objects.all().prefetch_related('roles', 'pharmacies')
+        search        = self.request.query_params.get('search')
+        qs            = User.objects.all().prefetch_related('roles', 'pharmacies')
         if role_filter:
             qs = qs.filter(roles__name=role_filter)
         if status_filter:
             qs = qs.filter(status=status_filter)
         if search:
             from django.db.models import Q
-            qs = qs.filter(Q(email__icontains=search) | Q(first_name__icontains=search) | Q(last_name__icontains=search))
+            qs = qs.filter(
+                Q(email__icontains=search) |
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search)
+            )
         return qs
 
     def get_serializer_class(self):
@@ -523,14 +514,14 @@ class SuperAdminUserViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def suspend(self, request, pk=None):
-        user = self.get_object()
+        user        = self.get_object()
         user.status = 'suspended'
         user.save(update_fields=['status'])
         return Response({'status': f'Compte {user.email} suspendu.'})
 
     @action(detail=True, methods=['post'])
     def activate(self, request, pk=None):
-        user = self.get_object()
+        user           = self.get_object()
         user.status    = 'active'
         user.is_active = True
         user.save(update_fields=['status', 'is_active'])
@@ -713,35 +704,40 @@ class PasswordResetConfirmView(APIView):
         new_token = default_token_generator.make_token(user)
 
         # ── Générer le QR Code en base64 ──────────────────────────
-        import qrcode, base64
+        import qrcode
         from io import BytesIO
-        uri = user.get_totp_uri()
-        buf = BytesIO()
+        uri    = user.get_totp_uri()
+        buf    = BytesIO()
         qrcode.make(uri).save(buf, format='PNG')
         qr_b64 = base64.b64encode(buf.getvalue()).decode()
 
         return Response({
             'message': 'Mot de passe changé. Veuillez scanner le QR Code.',
-            'qr': f'data:image/png;base64,{qr_b64}',
-            'uid': uidb64,
-            'token': new_token,
+            'qr'     : f'data:image/png;base64,{qr_b64}',
+            'uid'    : uidb64,
+            'token'  : new_token,
         })
 
 
 class PasswordResetTotpVerifyView(APIView):
-    """
-    Étape 4 : Vérification du code TOTP après reset password.
-    L'utilisateur a scanné le QR Code avec Google Authenticator
-    et saisit les 6 chiffres.
-    Si le code est valide → TOTP activé → succès → redirection vers connexion.
-    """
     permission_classes     = [AllowAny]
     authentication_classes = []
 
     def post(self, request):
-        uidb64    = request.data.get('uid')
-        token     = request.data.get('token')
-        totp_code = request.data.get('totp_code')
+        uidb64 = (
+            request.data.get('uid') or
+            request.query_params.get('uid')
+        )
+        token = (
+            request.data.get('token') or
+            request.query_params.get('token')
+        )
+        totp_code = (
+            request.data.get('totp_code') or
+            request.data.get('code') or
+            request.query_params.get('totp_code') or
+            request.query_params.get('code')
+        )
 
         if not uidb64 or not token:
             return Response(
@@ -759,20 +755,30 @@ class PasswordResetTotpVerifyView(APIView):
             uid  = urlsafe_base64_decode(uidb64).decode()
             user = User.objects.get(pk=uid)
         except (TypeError, ValueError, OverflowError, User.DoesNotExist):
-            return Response({'error': 'Lien invalide.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'Lien invalide.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         if not default_token_generator.check_token(user, token):
-            return Response({'error': 'Token invalide ou expiré.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'Token invalide ou expiré.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         if not user.verify_totp(totp_code):
-            return Response({'error': 'Code TOTP invalide.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'Code TOTP invalide.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # ── Activer le TOTP et confirmer le reset ─────────────────
         user.totp_enabled = True
         user.save(update_fields=['totp_enabled'])
 
-        return Response({'message': 'Mot de passe réinitialisé avec succès. Vous pouvez vous connecter.'})
-
+        return Response({
+            'message': 'Mot de passe réinitialisé avec succès. Vous pouvez vous connecter.'
+        })
 
 # ── Logout & refresh ──────────────────────────────────────────────────────────
 

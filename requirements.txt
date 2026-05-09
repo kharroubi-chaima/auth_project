@@ -3,5 +3,15 @@ djangorestframework
 djangorestframework-simplejwt
 psycopg2-binary
 face-recognition
+deepface
 opencv-python-headless
-numpy
+numpy
+django-crontab
+django-cors-headers
+django-filter
+channels
+daphne
+qrcode
+pyotp
+apscheduler
+tf-keras

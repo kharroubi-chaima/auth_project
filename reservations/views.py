@@ -93,7 +93,7 @@ class RecherchePharmacieView(APIView):
                 'medicament_id'     : stock.medicament.id,
                 'medicament_nom'    : stock.medicament.nom,
                 'medicament_dci'    : stock.medicament.dci or '',
-                'prix_vente'        : float(stock.prix_vente or stock.medicament.prix_vente),
+                'prix_vente'        : float(stock.prix_vente) if stock.prix_vente and  float (stock.prix_vente) > 0 else float(stock.medicament.prix_vente),
                 'quantite_stock'    : stock.quantite_stock,
                 'quantite_dispo'    : dispo,
                 'ordonnance_requise': stock.medicament.ordonnance_requise,
@@ -357,36 +357,52 @@ class MarquerRecupereeView(APIView):
 
             pharmacie     = stock.pharmacie
             pharmacien    = pharmacie.proprietaire
-            prix_unitaire = float(stock.prix_vente or med.prix_vente or 0)
-            quantite      = reservation.quantite
+          
+            quantite = reservation.quantite
+
+            # Récupérer le prix correctement (None check explicite, pas "or")
+            prix_unitaire = None
+            if getattr(stock, "prix_vente", None) is not None and float(stock.prix_vente) > 0:
+                prix_unitaire = float(stock.prix_vente)
+            elif getattr(med, "prix_vente", None) is not None and float(med.prix_vente) > 0:
+                prix_unitaire = float(med.prix_vente)
+            else:
+                prix_unitaire = 0.0
+                logger.warning(
+                    f"[Reservation #{pk}] Prix introuvable pour stock #{stock.id} "
+                    f"({med.nom}) — vente créée avec total 0."
+                )
+
+            total_vente = round(prix_unitaire * quantite, 3)
 
             if reservation.citoyen:
                 citoyen_nom = (
                     f"{reservation.citoyen.first_name} {reservation.citoyen.last_name}".strip()
                     or reservation.citoyen.email
                 )
+            else:
+                citoyen_nom = ""
 
             vente = Vente.objects.create(
-                pharmacie  = pharmacie,
-                created_by = pharmacien,
-                note       = f"Reservation #{reservation.id} — {citoyen_nom}",
-                total      = 0,
+                pharmacie=pharmacie,
+                created_by=pharmacien,
+                note=f"Reservation #{reservation.id} — {citoyen_nom}",
+                total=total_vente,  # ← total calculé directement, pas de double save
             )
-
             LigneVente.objects.create(
-                vente         = vente,
-                medicament    = med,
-                quantite      = quantite,
-                prix_unitaire = prix_unitaire,
+                vente=vente,
+                medicament=med,
+                quantite=quantite,
+                prix_unitaire=prix_unitaire,
             )
-
-            vente.total = quantite * prix_unitaire
-            vente.save(update_fields=['total'])
+            logger.info(
+                f"[Reservation #{pk}] Vente #{vente.id} — "
+                f"{quantite}x {med.nom} à {prix_unitaire} DT = {total_vente} DT"
+            )
 
         except Exception as e:
             logger.error(f"[Reservation #{pk}] Erreur creation vente automatique : {e}")
 
-        # ── NOUVEAU : Notification BDD visible en front ───────
         try:
             from stock.models import Notification
 
@@ -497,6 +513,16 @@ class HistoriqueReservationsProprietaireView(APIView):
                 models.Q(citoyen__last_name__icontains=citoyen_q)  |
                 models.Q(citoyen__email__icontains=citoyen_q)
             )"""
+
+        from django.db.models import Q
+        citoyen_q = request.query_params.get("citoyen", "").strip()
+        if citoyen_q:
+            qs = qs.filter(
+                Q(citoyen__first_name__icontains=citoyen_q) |
+                Q(citoyen__last_name__icontains=citoyen_q)  |
+                Q(citoyen__email__icontains=citoyen_q)              
+                )
+
 
         # ── Filtre par statut ─────────────────────────────────
         statut = request.query_params.get('statut', '').strip()

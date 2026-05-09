@@ -21,6 +21,7 @@ urlpatterns = [
     path('api/reservations/',         include('reservations.urls')),
     path('api/urgences/',             include('urgences.urls')),
     path('api/messagerie/',           include('messagerie.urls')),
+    path('api/chatbot/',              include('chatbot.urls')),
 
     # 4. Consolidate general API prefixes to avoid shadowing
     # accounts.urls (mostly /auth/) and pharmacies.urls (various)

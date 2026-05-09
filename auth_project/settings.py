@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'dashboard',
     'channels',
     'messagerie',
+    'chatbot',
 ]
 
 CRONJOBS = [

@@ -408,30 +408,25 @@ class VenteViewSet(viewsets.ModelViewSet):
 
         if self._est_admin():
             return base_qs.all()
+
         user = self.request.user
         pharmacie = get_pharmacie_user(user)
         if not pharmacie:
             return base_qs.none()
-        
+
+        # ✅ Toujours filtrer par pharmacie d'abord
+        qs = base_qs.filter(pharmacie=pharmacie)
+
+        # Propriétaire : peut filtrer par pharmacien
         if pharmacie.proprietaire == user:
-            qs = base_qs.filter(pharmacie=pharmacie)            
             pharmacien_id = self.request.query_params.get("pharmacien")
             if pharmacien_id:
-                return base_qs.filter(created_by_id=pharmacien_id)
+                qs = qs.filter(created_by_id=pharmacien_id)
             return qs
-        
-        user = self.request.user
 
-        pharmacie = get_pharmacie_user(user)
-        if not pharmacie:
-            return base_qs.none()
+        # ✅ Pharmacien employé : voit toutes les ventes de SA pharmacie
+        return qs  # plus de filter(created_by=user)
 
-
-        if pharmacie.proprietaire == user : 
-            return base_qs.filter(pharmacie=pharmacie)
-        return base_qs.filter(pharmacie=pharmacie, created_by=user)
-    
-    
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context["request"] = self.request
@@ -472,12 +467,12 @@ class VenteViewSet(viewsets.ModelViewSet):
         return Response(
             {
                 "aujourd_hui": agg(qs.filter(created_at__date=aujourd_hui)),
-                "semaine": agg(qs.filter(created_at__date__gte=debut_semaine)),
-                "mois": agg(qs.filter(created_at__date__gte=debut_mois)),
+                "semaine"    : agg(qs.filter(created_at__date__gte=debut_semaine)),
+                "mois"       : agg(qs.filter(created_at__date__gte=debut_mois)),
             }
         )
 
-
+        
 # ── Notifications ─────────────────────────────────────────────────────────────
 
 
