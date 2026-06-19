@@ -14,7 +14,6 @@ from .views import (
     PasswordResetValidateView,
     PasswordResetConfirmView,
     PasswordResetTotpVerifyView,
-    FaceLoginView,
 )
  
 router = DefaultRouter()
@@ -26,7 +25,6 @@ router.register(r'permissions', PermissionViewSet,   basename='permission')
 urlpatterns = [
     # ── Auth ──────────────────────────────────────────────────
     path('auth/login/',         CustomTokenObtainPairView.as_view(),  name='token_obtain'),
-    path('auth/face-login/',    FaceLoginView.as_view(),              name='face_login'),
     path('auth/refresh/',       CookieTokenRefreshView.as_view(),     name='token_refresh'),
     path('auth/logout/',        LogoutView.as_view(),                 name='logout'),
  

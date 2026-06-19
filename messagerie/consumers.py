@@ -69,7 +69,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             if user.pharmacies_travail.filter(id=conv.pharmacie.id).exists():
                 return True
             # Admin ou staff
-            if user.is_staff or user.roles.filter(name="administrateur").exists():
+            if user.is_staff or user.roles.filter(name="gérant").exists():
                 return True
             return False
         except Conversation.DoesNotExist:
@@ -96,18 +96,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
         )
 
     async def notifier_destinataire(self, message):
-        res = await self.get_or_create_notification(message)
+        res = await self.get_notification_details(message)
         if not res:
             return
         
-        destinataire_id, notif_id, conversation_id, expediteur_nom = res
+        destinataire_id, virtual_notif_id, conversation_id, expediteur_nom = res
 
         await self.channel_layer.group_send(
             f'notif_user_{destinataire_id}',
             {
                 'type': 'notification_message',
                 'notification': {
-                    'id': notif_id,
+                    'id': virtual_notif_id,
                     'conversation_id': conversation_id,
                     'expediteur_nom': expediteur_nom,
                     'contenu': message.contenu,
@@ -117,8 +117,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         )
 
     @database_sync_to_async
-    def get_or_create_notification(self, message):
-        from .models import Conversation, NotificationMessage
+    def get_notification_details(self, message):
+        from .models import Conversation
         try:
             conv = Conversation.objects.select_related(
                 'citoyen', 'pharmacie', 'pharmacie__proprietaire'
@@ -131,15 +131,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
             if not destinataire:
                 return None
-
-            notif = NotificationMessage.objects.create(
-                destinataire=destinataire,
-                conversation=conv,
-                message=message,
-            )
             
             expediteur_nom = f"{message.expediteur.first_name} {message.expediteur.last_name}".strip() or message.expediteur.email
-            return (destinataire.pk, notif.id, conv.id, expediteur_nom)
+            return (destinataire.pk, message.id, conv.id, expediteur_nom)
         except Exception:
             return None
 
@@ -234,7 +228,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
                 'lu':         n.lu,
                 'created_at': n.created_at.isoformat(),
             }
-            for n in NotificationSysteme.objects.filter(destinataire=self.user, lu=False)
+            for n in NotificationSysteme.objects.filter(destinataire=self.user).order_by('-created_at')[:50]
         ]
 
     @database_sync_to_async
@@ -304,7 +298,7 @@ class GroupChatConsumer(AsyncWebsocketConsumer):
             is_member = Group.objects.filter(id=group_id, membres=user).exists()
             if is_member: return True
             # Admin ou staff
-            return user.is_staff or user.roles.filter(name="administrateur").exists()
+            return user.is_staff or user.roles.filter(name="gérant").exists()
         except Exception:
             return False
 

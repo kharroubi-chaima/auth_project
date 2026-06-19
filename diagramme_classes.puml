@@ -1,0 +1,389 @@
+@startuml DiagrammeDeClasses
+
+skinparam classAttributeIconSize 0
+skinparam class {
+  BackgroundColor #EEF5FF
+  BorderColor #2A6DBF
+  FontSize 11
+  HeaderBackgroundColor #2A6DBF
+  HeaderFontColor #FFFFFF
+}
+skinparam package {
+  BackgroundColor #FAFAFA
+  BorderColor #888888
+  FontStyle bold
+  FontSize 13
+}
+skinparam ArrowColor #444444
+skinparam linetype ortho
+
+' ══════════════════════════════════════
+'          LOCALISATIONS
+' ══════════════════════════════════════
+package "Localisations" #FFFDE7 {
+
+  class Gouvernorat {
+    +id : UUID
+    +nom : String
+  }
+
+  class Delegation {
+    +id : UUID
+    +nom : String
+  }
+}
+
+' ══════════════════════════════════════
+'            ACCOUNTS
+' ══════════════════════════════════════
+package "Accounts" #E8F5E9 {
+
+  class User {
+    +id : UUID
+    +first_name : String
+    +last_name : String
+    +email : String
+    +telephone : String
+    +status : String
+    +is_staff : Boolean
+    +is_active : Boolean
+    +date_joined : DateTime
+    +totp_secret : String
+    +totp_enabled : Boolean
+    --
+    +generate_totp_secret()
+    +verify_totp(code) : Boolean
+    +get_full_name() : String
+    +has_role(*role_names) : Boolean
+  }
+
+  class Role {
+    +id : UUID
+    +name : String
+    +status : String
+    +created_at : DateTime
+  }
+
+  class Permission {
+    +id : UUID
+    +name : String
+    +status : String
+    +created_at : DateTime
+  }
+
+  class UserRole {
+    +id : UUID
+    +assigned_at : DateTime
+  }
+
+  class RolePermission {
+    +id : UUID
+    +assigned_at : DateTime
+  }
+}
+
+' ══════════════════════════════════════
+'           PHARMACIES
+' ══════════════════════════════════════
+package "Pharmacies" #E3F2FD {
+
+  class Pharmacie {
+    +id : UUID
+    +nom : String
+    +adresse : String
+    +telephone : String
+    +email : String
+    +categorie : String
+    +latitude : Decimal
+    +longitude : Decimal
+    +est_active : Boolean
+    +created_at : DateTime
+    +updated_at : DateTime
+    --
+    +verifier_ouverture(date, heure) : Boolean
+    +distance_km(lat, lng) : Float
+  }
+
+  class HoraireTravail {
+    +id : UUID
+    +jour : Integer
+    +est_ouvert : Boolean
+    +heure_ouverture : Time
+    +heure_fermeture : Time
+    +pause_debut : Time
+    +pause_fin : Time
+  }
+
+  class HoraireRamadan {
+    +id : UUID
+    +jour : Integer
+    +est_ouvert : Boolean
+    +heure_ouverture_1 : Time
+    +heure_fermeture_1 : Time
+    +heure_ouverture_2 : Time
+    +heure_fermeture_2 : Time
+  }
+
+  class GardePharmacie {
+    +id : UUID
+    +type_garde : String
+    +date_debut : Date
+    +date_fin : Date
+    --
+    +heure_debut : Time
+    +heure_fin : Time
+  }
+
+  class PeriodeRamadan {
+    +id : UUID
+    +annee : Integer
+    +date_debut : Date
+    +date_fin : Date
+  }
+
+  class JourFerieTunisie {
+    +id : UUID
+    +nom : String
+    +date : Date
+    +type_ferie : String
+  }
+
+  class DemandesSuspension {
+    +id : Integer
+    +motif : Text
+    +statut : String
+    +date_demande : DateTime
+    +date_traitement : DateTime
+    +commentaire_superadmin : Text
+  }
+}
+
+' ══════════════════════════════════════
+'              STOCK
+' ══════════════════════════════════════
+package "Stock" #FFF3E0 {
+
+  class ATC {
+    +id : Integer
+    +nom : String
+    +description : Text
+  }
+
+  class Categorie {
+    +id : Integer
+    +nom : String
+    +description : Text
+  }
+
+  class Medicament {
+    +id : Integer
+    +nom : String
+    +dci : String
+    +prix_achat : Decimal
+    +prix_vente : Decimal
+    +date_expiration : Date
+    +ordonnance_requise : Boolean
+    +quantite_stock : Integer
+    +seuil_alerte : Integer
+    +created_at : DateTime
+    --
+    +expire_bientot : Boolean
+    +stock_faible : Boolean
+    +en_rupture : Boolean
+  }
+
+  class StockPharmacie {
+    +id : Integer
+    +quantite_stock : Integer
+    +seuil_alerte : Integer
+    +prix_vente : Decimal
+    +created_at : DateTime
+    --
+    +stock_faible : Boolean
+    +en_rupture : Boolean
+  }
+
+  class MouvementStock {
+    +id : Integer
+    +type : String
+    +quantite : Integer
+    +motif : Text
+    +created_at : DateTime
+  }
+
+  class Vente {
+    +id : Integer
+    +total : Decimal
+    +note : Text
+    +created_at : DateTime
+    --
+    +calculer_total() : Decimal
+  }
+
+  class LigneVente {
+    +id : Integer
+    +quantite : Integer
+    +prix_unitaire : Decimal
+    --
+    +sous_total : Decimal
+  }
+
+  class Notification {
+    +id : Integer
+    +type : String
+    +message : Text
+    +statut : String
+    +destinataire : String
+    +created_at : DateTime
+  }
+}
+
+' ══════════════════════════════════════
+'           RÉSERVATIONS
+' ══════════════════════════════════════
+package "Réservations" #FCE4EC {
+
+  class Reservation {
+    +id : Integer
+    +quantite : Integer
+    +statut : String
+    +expire_at : DateTime
+    +created_at : DateTime
+    +updated_at : DateTime
+    --
+    +est_expiree : Boolean
+    +minutes_restantes : Integer
+  }
+}
+
+' ══════════════════════════════════════
+'             URGENCES
+' ══════════════════════════════════════
+package "Urgences" #F3E5F5 {
+
+  class DemandeUrgente {
+    +id : Integer
+    +type_demande : String
+    +titre : String
+    +description : Text
+    +lat : Decimal
+    +lng : Decimal
+    +rayon_km : Float
+    +statut : String
+    +created_at : DateTime
+    +expire_at : DateTime
+    --
+    +est_expiree : Boolean
+  }
+}
+
+' ══════════════════════════════════════
+'            MESSAGERIE
+' ══════════════════════════════════════
+package "Messagerie" #E0F7FA {
+
+  class Conversation {
+    +id : Integer
+    +created_at : DateTime
+    +updated_at : DateTime
+  }
+
+  class Message {
+    +id : Integer
+    +contenu : Text
+    +lu : Boolean
+    +created_at : DateTime
+  }
+
+  class UserPresence {
+    +id : Integer
+    +en_ligne : Boolean
+    +last_seen : DateTime
+  }
+
+  class Group {
+    +id : UUID
+    +nom : String
+    +created_at : DateTime
+    +updated_at : DateTime
+  }
+
+  class GroupMessage {
+    +id : Integer
+    +contenu : Text
+    +created_at : DateTime
+  }
+
+  class NotificationSysteme {
+    +id : Integer
+    +type : String
+    +titre : String
+    +message : Text
+    +lu : Boolean
+    +created_at : DateTime
+  }
+}
+
+
+' ══════════════════════════════════════════════════════
+'                    RELATIONS
+' ══════════════════════════════════════════════════════
+
+' ── Localisations ─────────────────────────────────────
+Gouvernorat "1" *--> "0..*" Delegation : contient >
+
+' ── Accounts ──────────────────────────────────────────
+User       "1" --> "0..*" UserRole       : a >
+Role       "1" --> "0..*" UserRole       : attribué via >
+Role       "1" --> "0..*" RolePermission : a >
+Permission "1" --> "0..*" RolePermission : attribué via >
+User       "1" --> "0..*" Role           : created_by
+User       "1" --> "0..*" Permission     : created_by
+
+' ── Pharmacies ────────────────────────────────────────
+Delegation  "1"   --> "0..*" Pharmacie          : situe >
+User        "1"   --> "0..1" Pharmacie          : possède (proprietaire) >
+User        "0..*"--> "0..*" Pharmacie          : travaille dans >
+Pharmacie   "1"  *--> "0..*" HoraireTravail     : horaires >
+Pharmacie   "1"  *--> "0..*" HoraireRamadan     : horaires ramadan >
+Pharmacie   "1"  *--> "0..*" GardePharmacie     : planifie >
+Pharmacie   "1"  *--> "0..*" DemandesSuspension : fait l'objet de >
+User        "1"   --> "0..*" DemandesSuspension : soumet (demandeur) >
+User        "0..1"--> "0..*" DemandesSuspension : traite >
+
+' ── Stock ─────────────────────────────────────────────
+ATC        "1"  --> "0..*" Categorie      : classifie >
+Categorie  "1"  --> "0..*" Medicament     : catégorise >
+Pharmacie  "1" *--> "0..*" StockPharmacie : gère >
+Medicament "1"  --> "0..*" StockPharmacie : stocké dans >
+StockPharmacie "1" *--> "0..*" MouvementStock : enregistre >
+User       "0..1"--> "0..*" MouvementStock : crée >
+Pharmacie  "1"  *--> "0..*" Vente         : génère >
+User       "0..1"--> "0..*" Vente         : crée >
+Vente      "1"  *--> "1..*" LigneVente    : compose >
+Medicament "1"   --> "0..*" LigneVente    : concerne >
+Pharmacie  "1"   --> "0..*" Notification  : reçoit >
+Medicament "1"   --> "0..*" Notification  : concerne >
+
+' ── Réservations ──────────────────────────────────────
+User           "1" --> "0..*" Reservation : effectue (citoyen) >
+StockPharmacie "1" --> "0..*" Reservation : concerne >
+Medicament     "1" --> "0..*" Reservation : porte sur >
+
+' ── Urgences ──────────────────────────────────────────
+User      "1"    --> "0..*" DemandeUrgente : soumet >
+Pharmacie "0..1" --> "0..*" DemandeUrgente : répond à >
+
+' ── Messagerie ────────────────────────────────────────
+User         "1"    --> "0..*" Conversation        : initie (citoyen) >
+Pharmacie    "1"    --> "0..*" Conversation        : reçoit >
+Conversation "1"   *--> "0..*" Message             : contient >
+User         "1"    --> "0..*" Message             : envoie >
+User         "1"    --> "1"    UserPresence        : a >
+User         "1"    --> "0..*" Group               : crée >
+User         "0..*" --> "0..*" Group               : membre de >
+Group        "1"   *--> "0..*" GroupMessage        : contient >
+User         "1"    --> "0..*" GroupMessage        : envoie >
+User         "1"    --> "0..*" NotificationSysteme : reçoit >
+
+@enduml

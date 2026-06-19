@@ -141,7 +141,7 @@ class GardePharmacieViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+        if user.is_superuser or user.roles.filter(name='administrateur').exists():
             qs = GardePharmacie.objects.all().select_related('pharmacie__delegation__gouvernorat').order_by('date_debut')
             
             gouvernorat_id = self.request.query_params.get('pharmacie__delegation__gouvernorat')
@@ -158,7 +158,6 @@ class GardePharmacieViewSet(viewsets.ModelViewSet):
             proprietaire=user
         ).first()
         
-        
         if not pharmacie:
             pharmacie = user.pharmacies_travail.first()
         if not pharmacie:
@@ -167,22 +166,23 @@ class GardePharmacieViewSet(viewsets.ModelViewSet):
             pharmacie=pharmacie
         ).order_by('date_debut')
 
-    def perform_create(self, serializer):
-        user = self.request.user
-        # Superadmin : pharmacie fournie dans le payload
-        if user.is_superuser or user.roles.filter(name='superadmin').exists():
-            serializer.save()
-            return
-        # Admin/propriétaire : on résout la pharmacie automatiquement
-        pharmacie = Pharmacie.objects.filter(
-            proprietaire=user,
-            est_active=True
-        ).first()
-        if not pharmacie:
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError('Aucune pharmacie associée à votre compte.')
-        serializer.save(pharmacie=pharmacie)
-        
+    def create(self, request, *args, **kwargs):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied("La création manuelle de garde n'est pas autorisée. Les gardes sont gérées de manière automatique.")
+
+    def update(self, request, *args, **kwargs):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied("La modification manuelle de garde n'est pas autorisée. Les gardes sont gérées de manière automatique.")
+
+    def partial_update(self, request, *args, **kwargs):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied("La modification manuelle de garde n'est pas autorisée. Les gardes sont gérées de manière automatique.")
+
+    def destroy(self, request, *args, **kwargs):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied("La suppression manuelle de garde n'est pas autorisée. Les gardes sont gérées de manière automatique.")
+
+
 class PharmacieAdminSerializer(serializers.ModelSerializer):
     delegation   = DelegationSerializer(read_only=True)
     proprietaire = serializers.SerializerMethodField()
@@ -214,7 +214,7 @@ class PharmacieAdminViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
-        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+        if user.is_superuser or user.roles.filter(name='administrateur').exists():
             return Pharmacie.objects.all().select_related(
                 'delegation__gouvernorat')
         return Pharmacie.objects.filter(
@@ -235,7 +235,7 @@ class PharmacieAdminViewSet(viewsets.ModelViewSet):
         return (
             user.is_staff or
             user.is_superuser or
-            user.roles.filter(name='administrateur').exists()
+            user.roles.filter(name='gérant').exists()
         )
 
     def perform_create(self, serializer):
@@ -268,7 +268,7 @@ class PharmacieAdminViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         user = self.request.user
-        if not (user.is_superuser or user.roles.filter(name='superadmin').exists()) and str(instance.proprietaire_id) != str(user.id):
+        if not (user.is_superuser or user.roles.filter(name='administrateur').exists()) and str(instance.proprietaire_id) != str(user.id):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Vous ne pouvez supprimer que votre propre pharmacie.")
         instance.delete()
@@ -375,15 +375,16 @@ def mes_pharmaciens(request):
     pharmaciens = User.objects.filter(
         roles__name='pharmacien',
         pharmacies_travail=pharmacie
-    ).distinct()
+    ).values('id', 'first_name', 'last_name', 'email', 'telephone', 'is_active', 'date_joined').distinct()
 
     data = [
         {
-            'id'       : str(u.id),
-            'nom'      : f"{u.first_name} {u.last_name}".strip() or u.email,
-            'email'    : u.email,
-            'telephone': getattr(u, 'telephone', '') or '',
-            'est_actif': u.is_active,
+            'id'           : str(u['id']),
+            'nom'          : f"{u['first_name']} {u['last_name']}".strip() or u['email'],
+            'email'        : u['email'],
+            'telephone'    : u['telephone'] or '',
+            'est_actif'    : u['is_active'],
+            'date_creation': u['date_joined'],
         }
         for u in pharmaciens
     ]
@@ -473,14 +474,14 @@ class DemandesSuspensionViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         print("user connecté :", user.email)
-        # Superadmin voit tout ; admin ne voit que les siennes
-        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+        # Administrateur voit tout ; admin ne voit que les siennes
+        if user.is_superuser or user.roles.filter(name='administrateur').exists():
             return DemandesSuspension.objects.all()
         return DemandesSuspension.objects.filter(demandeur=user)
 
     def perform_create(self, serializer):
         user = self.request.user
-        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+        if user.is_superuser or user.roles.filter(name='administrateur').exists():
             serializer.save(demandeur=user)
             return
         pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
@@ -489,12 +490,39 @@ class DemandesSuspensionViewSet(viewsets.ModelViewSet):
             raise ValidationError('Vous ne possédez aucune pharmacie.')
         serializer.save(demandeur=self.request.user, pharmacie=pharmacie)
 
+    def update(self, request, *args, **kwargs):
+        """Admin peut modifier UNIQUEMENT ses demandes encore en_attente."""
+        demande = self.get_object()
+        if demande.statut != 'en_attente':
+            return Response(
+                {'detail': 'Impossible de modifier une demande déjà traitée.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if str(demande.demandeur_id) != str(request.user.id) and \
+           not (request.user.is_superuser or request.user.roles.filter(name='administrateur').exists()):
+            return Response({'detail': 'Accès refusé.'}, status=403)
+        kwargs['partial'] = True
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        """Admin peut supprimer UNIQUEMENT ses demandes encore en_attente."""
+        demande = self.get_object()
+        if demande.statut != 'en_attente':
+            return Response(
+                {'detail': 'Impossible de supprimer une demande déjà traitée.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if str(demande.demandeur_id) != str(request.user.id) and \
+           not (request.user.is_superuser or request.user.roles.filter(name='administrateur').exists()):
+            return Response({'detail': 'Accès refusé.'}, status=403)
+        return super().destroy(request, *args, **kwargs)
+
     @action(detail=True, methods=['patch'], url_path='traiter')
     def traiter(self, request, pk=None):
-        """Superadmin approuve ou refuse la demande."""
+        """Administrateur approuve ou refuse la demande."""
         from django.utils import timezone
         if not (request.user.is_superuser or
-                request.user.roles.filter(name='superadmin').exists()):
+                request.user.roles.filter(name='administrateur').exists()):
             return Response({'detail': 'Accès refusé.'}, status=403)
 
         demande = self.get_object()
@@ -528,41 +556,39 @@ def mes_citoyens(request):
         return Response({'pharmacie_nom': '', 'citoyens': []})
 
     from reservations.models import Reservation
-    from django.db.models import Count, Max
+    from django.db.models import Count, Max, F
 
-    # Check your Reservation model for the actual timestamp field name
-    # Common names: created_at, date_creation, date_commande, created
-    DATE_FIELD = 'created_at'  # ← change this if needed
-
+    # Optimisation : On fait tout en une seule requête SQL avec jointures et groupement
     try:
         qs = (
             Reservation.objects
             .filter(stock__pharmacie=pharmacie)
-            .values('citoyen')
+            .annotate(
+                uid=F('citoyen__id'),
+                fn=F('citoyen__first_name'),
+                ln=F('citoyen__last_name'),
+                em=F('citoyen__email')
+            )
+            .values('uid', 'fn', 'ln', 'em')
             .annotate(
                 total_commandes=Count('id'),
-                derniere_visite=Max(DATE_FIELD),
+                derniere_visite=Max('created_at'),
             )
+            .order_by('-derniere_visite')
         )
-        # Force evaluation to catch field errors early
-        qs = list(qs)
+        
+        data = [
+            {
+                'id'             : str(row['uid']),
+                'nom'            : f"{row['fn']} {row['ln']}".strip() or row['em'],
+                'email'          : row['em'],
+                'total_commandes': row['total_commandes'],
+                'derniere_visite': row['derniere_visite'],
+            }
+            for row in qs
+        ]
     except Exception as e:
         return Response({'error': str(e)}, status=500)
-
-    citoyen_ids = [row['citoyen'] for row in qs]
-    citoyens_map = {u.id: u for u in User.objects.filter(id__in=citoyen_ids)}
-
-    data = [
-        {
-            'id'             : str(row['citoyen']),
-            'nom' : f"{citoyens_map[row['citoyen']].first_name} {citoyens_map[row['citoyen']].last_name}".strip() or citoyens_map[row['citoyen']].email,
-            'email'          : citoyens_map[row['citoyen']].email,
-            'total_commandes': row['total_commandes'],
-            'derniere_visite': row['derniere_visite'],
-        }
-        for row in qs
-        if row['citoyen'] in citoyens_map
-    ]
 
     return Response({'pharmacie_nom': pharmacie.nom, 'citoyens': data})
 
@@ -579,7 +605,7 @@ def mes_gardes(request):
     if not pharmacie:
         pharmacie = request.user.pharmacies_travail.first()
 
-    # 3. Admin avec rôle 'administrateur' (sans être propriétaire)
+    # 3. Admin avec rôle 'gérant' (sans être propriétaire)
     if not pharmacie and is_admin(request.user):
         pharmacie = get_pharmacie_admin(request.user)
 
@@ -621,24 +647,48 @@ def periodes_ramadan(request):
 def dashboard_stats(request):
     from django.utils import timezone
     from accounts.models import User
+    from reservations.models import Reservation
+    
+    user = request.user
     now = timezone.now()
     this_month = now.replace(day=1)
+
+    # Si c'est un SuperAdmin, on garde les stats globales
+    if user.is_superuser or user.roles.filter(name='administrateur').exists():
+        return Response({
+            'total_utilisateurs': User.objects.count(),
+            'nouveaux_ce_mois': User.objects.filter(date_joined__gte=this_month).count(),
+            'comptes_en_attente': User.objects.filter(is_active=False).count(),
+            'pharmacies_actives': Pharmacie.objects.filter(est_active=True).count(),
+            'pharmacies_inactives': Pharmacie.objects.filter(est_active=False).count(),
+            'nouvelles_ce_mois': Pharmacie.objects.filter(created_at__gte=this_month).count(),
+            'roles': {
+                'citoyens': User.objects.filter(roles__name='citoyen').count(),
+                'pharmaciens': User.objects.filter(roles__name='pharmacien').count(),
+                'administrateurs': User.objects.filter(roles__name='gérant').count(),
+            }
+        })
+
+    # Sinon, on retourne les stats de SA pharmacie
+    pharmacie = get_pharmacie_admin(user)
+    if not pharmacie:
+        return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+
+    # Pharmaciens rattachés
+    nb_pharmaciens = User.objects.filter(roles__name='pharmacien', pharmacies_travail=pharmacie).count()
+    
+    # Citoyens ayant commandé (distinct)
+    nb_citoyens = Reservation.objects.filter(stock__pharmacie=pharmacie).values('citoyen').distinct().count()
+    
+    # Commandes totales
+    total_commandes = Reservation.objects.filter(stock__pharmacie=pharmacie).count()
+
     return Response({
-        'total_utilisateurs': User.objects.count(),
-        'nouveaux_ce_mois': User.objects.filter(date_joined__gte=this_month).count(),
-        'comptes_en_attente': User.objects.filter(is_active=False).count(),
-        'pharmacies_actives': Pharmacie.objects.filter(est_active=True).count(),
-        'pharmacies_inactives': Pharmacie.objects.filter(est_active=False).count(),
-        'nouvelles_ce_mois': Pharmacie.objects.filter(created_at__gte=this_month).count(),
-        'gardes_ce_mois': GardePharmacie.objects.filter(
-            date_debut__year=now.year,
-            date_fin__month=now.month,
-        ).count(),
-        'roles': {
-            'citoyens': User.objects.filter(roles__name='citoyen').count(),
-            'pharmaciens': User.objects.filter(roles__name='pharmacien').count(),
-            'administrateurs': User.objects.filter(roles__name='administrateur').count(),
-        }
+        'nb_pharmaciens': nb_pharmaciens,
+        'nb_citoyens': nb_citoyens,
+        'total_commandes': total_commandes,
+        'pharmacie_nom': pharmacie.nom,
+        'est_active': pharmacie.est_active
     })
     
 # ─────────────────────────────────────────────────────────
@@ -728,7 +778,7 @@ def is_admin(user):
     return (
         user.is_staff
         or user.is_superuser
-        or user.roles.filter(name__in=['administrateur', 'superadmin']).exists()
+        or user.roles.filter(name__in=['gérant', 'administrateur']).exists()
     )
  
 class HoraireViewSet(viewsets.ModelViewSet):
@@ -740,7 +790,7 @@ class HoraireViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+        if user.is_superuser or user.roles.filter(name='administrateur').exists():
             return HoraireTravail.objects.all().select_related('pharmacie__delegation__gouvernorat')
         pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
         if not pharmacie:
@@ -756,7 +806,7 @@ class HoraireRamadanViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.is_superuser or user.roles.filter(name='superadmin').exists():
+        if user.is_superuser or user.roles.filter(name='administrateur').exists():
             return HoraireRamadan.objects.all().select_related('pharmacie__delegation__gouvernorat')
         pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
         if not pharmacie:

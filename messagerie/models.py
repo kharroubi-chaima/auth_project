@@ -55,6 +55,7 @@ class GroupMessage(models.Model):
     groupe     = models.ForeignKey(Group, on_delete=models.CASCADE, related_name='messages')
     expediteur = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='group_messages_envoyes')
     contenu    = models.TextField()
+    is_system  = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -63,18 +64,6 @@ class GroupMessage(models.Model):
     def __str__(self):
         return f"Group {self.groupe.nom} - {self.expediteur.email}"
 
-
-class NotificationMessage(models.Model):
-    destinataire = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='notifications_messages')
-    conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, null=True, blank=True)
-    groupe       = models.ForeignKey(Group, on_delete=models.CASCADE, null=True, blank=True)
-    message      = models.ForeignKey(Message, on_delete=models.CASCADE, null=True, blank=True)
-    message_groupe = models.ForeignKey(GroupMessage, on_delete=models.CASCADE, null=True, blank=True)
-    lu           = models.BooleanField(default=False)
-    created_at   = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ['-created_at']
 
 
 class NotificationSysteme(models.Model):

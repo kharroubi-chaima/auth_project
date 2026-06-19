@@ -10,3 +10,8 @@ db.sqlite3
 README.md
 docker-compose.yml
 postgres_data/
+env/
+env311/
+venv/
+.venv/
+media/

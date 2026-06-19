@@ -37,16 +37,69 @@ class PharmacieCreateSerializer(serializers.ModelSerializer):
     def validate(self, data):
         lat = data.get("latitude")
         lng = data.get("longitude")
-        if lat and lng:
-            existante = Pharmacie.objects.filter(latitude=lat, longitude=lng)
-            if self.instance:
-                existante = existante.exclude(pk=self.instance.pk)
-            if existante.exists():
-                raise serializers.ValidationError(
-                    {
-                        "coordonnees": f"Une pharmacie existe déjà à ces coordonnées ({lat}, {lng})."
-                    }
-                )
+        categorie = data.get("categorie", "A")
+
+        if lat is None or lng is None:
+            raise serializers.ValidationError(
+                {
+                    "coordonnees": "Les coordonnées GPS (latitude et longitude) sont obligatoires pour enregistrer une pharmacie."
+                }
+            )
+
+        lat_f = float(lat)
+        lng_f = float(lng)
+
+        # 1. Vérification géographique (Tunisie seulement)
+        if not (30.0 <= lat_f <= 37.6) or not (7.0 <= lng_f <= 12.0):
+            raise serializers.ValidationError(
+                {
+                    "coordonnees": "La localisation géographique de la pharmacie doit être située impérativement en Tunisie."
+                }
+            )
+
+        # 2. Vérification réglementaire CNOPT (distances minimales)
+        active_pharmacies = Pharmacie.objects.filter(est_active=True)
+        if self.instance:
+            active_pharmacies = active_pharmacies.exclude(pk=self.instance.pk)
+
+        for p in active_pharmacies:
+            if p.latitude is not None and p.longitude is not None:
+                dist = p.distance_km(lat_f, lng_f) * 1000  # conversion en mètres
+                
+                # Pharmacie de catégorie A (de jour) : distance minimale = 200 mètres entre deux officines A
+                if categorie == "A" and p.categorie == "A":
+                    if dist < 200:
+                        raise serializers.ValidationError(
+                            {
+                                "coordonnees": (
+                                    f"Réglementation CNOPT non respectée : Une pharmacie de catégorie A "
+                                    f"('{p.nom}') est située à {int(dist)} mètres (minimum requis : 200m)."
+                                )
+                            }
+                        )
+                
+                # Pharmacie de catégorie B (de nuit) : distance minimale = 500 mètres entre deux officines B
+                elif categorie == "B" and p.categorie == "B":
+                    if dist < 500:
+                        raise serializers.ValidationError(
+                            {
+                                "coordonnees": (
+                                    f"Réglementation CNOPT non respectée : Une pharmacie de catégorie B "
+                                    f"('{p.nom}') est située à {int(dist)} mètres (minimum requis : 500m)."
+                                )
+                            }
+                        )
+
+        # Coordonnées exactes identiques
+        existante = Pharmacie.objects.filter(latitude=lat, longitude=lng)
+        if self.instance:
+            existante = existante.exclude(pk=self.instance.pk)
+        if existante.exists():
+            raise serializers.ValidationError(
+                {
+                    "coordonnees": f"Une pharmacie existe déjà à ces coordonnées exactes ({lat}, {lng})."
+                }
+            )
 
         nom = data.get("nom")
         adresse = data.get("adresse")

@@ -348,3 +348,181 @@ class Top5MedicamentsView(APIView):
                 for row in top
             ],
         })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rapports Personnalisés (Gérant)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class VentesParPharmacienView(APIView):
+    """
+    GET /api/dashboard/ventes-par-pharmacien/?date_debut=YYYY-MM-DD&date_fin=YYYY-MM-DD
+    Retourne le CA généré par chaque employé (pharmacien) de la pharmacie.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        pharmacie = get_pharmacie(request.user)
+        if not pharmacie:
+            return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+
+        date_debut_str = request.query_params.get('date_debut')
+        date_fin_str = request.query_params.get('date_fin')
+
+        qs = Vente.objects.filter(pharmacie=pharmacie)
+
+        if date_debut_str:
+            try:
+                debut = date.fromisoformat(date_debut_str)
+                qs = qs.filter(created_at__date__gte=debut)
+            except ValueError:
+                pass
+        if date_fin_str:
+            try:
+                fin = date.fromisoformat(date_fin_str)
+                qs = qs.filter(created_at__date__lte=fin)
+            except ValueError:
+                pass
+
+        qs = (
+            qs.values('created_by__first_name', 'created_by__last_name', 'created_by__email')
+            .annotate(ca=Sum('total'))
+            .order_by('-ca')
+        )
+
+        data = []
+        for row in qs:
+            fname = row.get('created_by__first_name') or ''
+            lname = row.get('created_by__last_name') or ''
+            nom = f"{fname} {lname}".strip()
+            if not nom:
+                nom = row.get('created_by__email') or 'Inconnu'
+                
+            data.append({
+                'pharmacien': nom,
+                'ca': float(row['ca'] or 0)
+            })
+
+        return Response({'data': data})
+
+
+class ListeMedicamentsPharmacieView(APIView):
+    """
+    GET /api/dashboard/medicaments-liste/
+    Retourne la liste (id, nom) des médicaments présents dans le stock de la pharmacie.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        pharmacie = get_pharmacie(request.user)
+        if not pharmacie:
+            return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+
+        stocks = StockPharmacie.objects.filter(pharmacie=pharmacie).select_related('medicament')
+        data = [{'id': s.medicament.id, 'nom': s.medicament.nom} for s in stocks]
+        
+        # Tri alphabétique par nom
+        data.sort(key=lambda x: x['nom'].lower())
+        
+        return Response({'data': data})
+
+
+class ComparaisonMedicamentsView(APIView):
+    """
+    GET /api/dashboard/comparaison-medicaments/?med1=ID&med2=ID&date_debut=YYYY-MM-DD&date_fin=YYYY-MM-DD
+    Retourne l'historique quotidien des ventes (CA) pour les deux médicaments.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        pharmacie = get_pharmacie(request.user)
+        if not pharmacie:
+            return Response({'detail': 'Aucune pharmacie trouvée.'}, status=404)
+
+        med1_id = request.query_params.get('med1')
+        med2_id = request.query_params.get('med2')
+        date_debut_str = request.query_params.get('date_debut')
+        date_fin_str = request.query_params.get('date_fin')
+
+        if not med1_id or not med2_id:
+            return Response({'detail': 'Veuillez spécifier deux médicaments (med1 et med2).'}, status=400)
+            
+        try:
+            med1_id = int(med1_id)
+            med2_id = int(med2_id)
+        except ValueError:
+             return Response({'detail': 'Identifiants de médicaments invalides.'}, status=400)
+
+        # Détermination des dates
+        today = date.today()
+        debut = today - timedelta(days=30)
+        fin = today
+        
+        if date_debut_str:
+            try:
+                debut = date.fromisoformat(date_debut_str)
+            except ValueError:
+                pass
+        if date_fin_str:
+            try:
+                fin = date.fromisoformat(date_fin_str)
+            except ValueError:
+                pass
+
+        if fin < debut:
+            fin = debut
+
+        # Générer la liste des jours
+        jours = []
+        courant = debut
+        while courant <= fin:
+            jours.append(courant)
+            courant += timedelta(days=1)
+            
+        # Noms des médicaments
+        noms = {}
+        meds = Medicament.objects.filter(id__in=[med1_id, med2_id])
+        for m in meds:
+            noms[m.id] = m.nom
+
+        # Ventes med1
+        from django.db.models import F
+        qs1 = LigneVente.objects.filter(
+            vente__pharmacie=pharmacie,
+            medicament_id=med1_id,
+            vente__created_at__date__gte=debut,
+            vente__created_at__date__lte=fin
+        ).values('vente__created_at__date').annotate(
+            ca=Sum(F('quantite') * F('prix_unitaire'))
+        )
+        
+        # Ventes med2
+        qs2 = LigneVente.objects.filter(
+            vente__pharmacie=pharmacie,
+            medicament_id=med2_id,
+            vente__created_at__date__gte=debut,
+            vente__created_at__date__lte=fin
+        ).values('vente__created_at__date').annotate(
+            ca=Sum(F('quantite') * F('prix_unitaire'))
+        )
+
+        # Indexer par date
+        dict_med1 = { row['vente__created_at__date']: row['ca'] for row in qs1 }
+        dict_med2 = { row['vente__created_at__date']: row['ca'] for row in qs2 }
+
+        data = []
+        for jour in jours:
+            ca1 = dict_med1.get(jour, 0)
+            ca2 = dict_med2.get(jour, 0)
+            data.append({
+                'date': jour.isoformat(),
+                'label': jour.strftime('%d/%m'),
+                'med1_ca': float(ca1),
+                'med2_ca': float(ca2),
+            })
+
+        return Response({
+            'med1_nom': noms.get(med1_id, f'Médicament {med1_id}'),
+            'med2_nom': noms.get(med2_id, f'Médicament {med2_id}'),
+            'data': data
+        })

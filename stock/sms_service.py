@@ -56,13 +56,26 @@ def _notification_recente_existe(pharmacie, medicament, type_notif: str) -> bool
 
 # ── Logique de notification ────────────────────────────────────────────────────
 
+def _get_destinataires(pharmacie):
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    destinataires = []
+    if pharmacie.proprietaire:
+        destinataires.append(pharmacie.proprietaire)
+    employes = list(User.objects.filter(pharmacies_travail=pharmacie))
+    for emp in employes:
+        if emp not in destinataires:
+            destinataires.append(emp)
+    return destinataires
+
+
 def verifier_et_notifier_stock(stock) -> None:
     from .models import Notification
     from messagerie.utils import envoyer_notification_ws
 
     try:
-        pharmacien = stock.pharmacie.proprietaire
-        if not pharmacien:
+        destinataires = _get_destinataires(stock.pharmacie)
+        if not destinataires:
             return
 
         pharmacie_nom  = stock.pharmacie.nom
@@ -85,16 +98,16 @@ def verifier_et_notifier_stock(stock) -> None:
                         f"{medicament_nom} ({pharmacie_nom}). Ignorée.")
             return
 
-        ok = envoyer_notification_ws(pharmacien.pk, type_notif, titre, msg)
-
-        Notification.objects.create(
-            pharmacie=stock.pharmacie,
-            medicament=stock.medicament,
-            type=type_notif,
-            message=msg,
-            statut='envoye' if ok else 'echec',
-            destinataire=pharmacien.email,
-        )
+        for d in destinataires:
+            ok = envoyer_notification_ws(d.pk, type_notif, titre, msg)
+            Notification.objects.create(
+                pharmacie=stock.pharmacie,
+                medicament=stock.medicament,
+                type=type_notif,
+                message=msg,
+                statut='envoye' if ok else 'echec',
+                destinataire=d.email,
+            )
 
     except Exception as e:
         logger.error(f"Erreur notification stock (stock_id={stock.pk}) : {e}")
@@ -105,8 +118,8 @@ def verifier_et_notifier_stock_virtuel(stock, quantite_virtuelle: int) -> None:
     from messagerie.utils import envoyer_notification_ws
 
     try:
-        pharmacien = stock.pharmacie.proprietaire
-        if not pharmacien:
+        destinataires = _get_destinataires(stock.pharmacie)
+        if not destinataires:
             return
 
         pharmacie_nom  = stock.pharmacie.nom
@@ -128,16 +141,17 @@ def verifier_et_notifier_stock_virtuel(stock, quantite_virtuelle: int) -> None:
             logger.info(f"Notification '{type_notif}' déjà envoyée récemment. Ignorée.")
             return
 
-        ok = envoyer_notification_ws(pharmacien.pk, type_notif, titre, msg)
+        for d in destinataires:
+            ok = envoyer_notification_ws(d.pk, type_notif, titre, msg)
 
-        Notification.objects.create(
-            pharmacie=stock.pharmacie,
-            medicament=stock.medicament,
-            type=type_notif,
-            message=msg,
-            statut='envoye' if ok else 'echec',
-            destinataire=pharmacien.email,
-        )
+            Notification.objects.create(
+                pharmacie=stock.pharmacie,
+                medicament=stock.medicament,
+                type=type_notif,
+                message=msg,
+                statut='envoye' if ok else 'echec',
+                destinataire=d.email,
+            )
 
     except Exception as e:
         logger.error(f"Erreur notification stock virtuel (stock_id={stock.pk}) : {e}")
@@ -159,9 +173,9 @@ def notifier_expirations_proches(jours: int = 30) -> int:
 
     for stock in stocks:
         try:
-            pharmacien = stock.pharmacie.proprietaire
-            if not pharmacien:
-                logger.warning(f"Pas de propriétaire pour la pharmacie {stock.pharmacie.nom}")
+            destinataires = _get_destinataires(stock.pharmacie)
+            if not destinataires:
+                logger.warning(f"Pas de destinataires pour la pharmacie {stock.pharmacie.nom}")
                 continue
 
             if _notification_recente_existe(stock.pharmacie, stock.medicament, 'expiration'):
@@ -175,19 +189,20 @@ def notifier_expirations_proches(jours: int = 30) -> int:
                 pharmacie_nom=stock.pharmacie.nom,
             )
 
-            ok = envoyer_notification_ws(pharmacien.pk, 'expiration', 'Expiration proche', msg)
+            for d in destinataires:
+                ok = envoyer_notification_ws(d.pk, 'expiration', 'Expiration proche', msg)
 
-            Notification.objects.create(
-                pharmacie=stock.pharmacie,
-                medicament=stock.medicament,
-                type='expiration',
-                message=msg,
-                statut='envoye' if ok else 'echec',
-                destinataire=pharmacien.email,
-            )
+                Notification.objects.create(
+                    pharmacie=stock.pharmacie,
+                    medicament=stock.medicament,
+                    type='expiration',
+                    message=msg,
+                    statut='envoye' if ok else 'echec',
+                    destinataire=d.email,
+                )
 
-            if ok:
-                total_envoyes += 1
+                if ok:
+                    total_envoyes += 1
 
         except Exception as e:
             logger.error(f"Erreur notification expiration (stock_id={stock.pk}) : {e}")

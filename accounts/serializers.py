@@ -1,5 +1,6 @@
 # accounts/serializers.py
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 from django.core.mail import send_mail
 from django.conf import settings
 import secrets
@@ -43,6 +44,17 @@ class UserSerializer(serializers.ModelSerializer):
     Le compte est actif immédiatement — pas de TOTP requis à l'inscription.
     Le TOTP reste disponible en option (setup + disable) mais n'est plus obligatoire.
     """
+    email = serializers.EmailField(
+        validators=[
+            UniqueValidator(
+                queryset=User.objects.all(),
+                message="Un utilisateur avec cette adresse email existe déjà."
+            )
+        ],
+        error_messages={
+            'invalid': "Veuillez saisir une adresse email valide."
+        }
+    )
     password = serializers.CharField(
         write_only=True, required=True,
         style={'input_type': 'password'}
@@ -115,6 +127,17 @@ class ChangePasswordSerializer(serializers.Serializer):
 # ── Création compte pharmacien (par admin/superadmin) ─────────────────────────
 
 class PharmacienCreateSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(
+        validators=[
+            UniqueValidator(
+                queryset=User.objects.all(),
+                message="Un utilisateur avec cette adresse email existe déjà."
+            )
+        ],
+        error_messages={
+            'invalid': "Veuillez saisir une adresse email valide."
+        }
+    )
     class Meta:
         model  = User
         fields = [
@@ -147,12 +170,30 @@ class PharmacienCreateSerializer(serializers.ModelSerializer):
         user = User.objects.create_user(password=password_clair, **validated_data)
         user.is_active = True
         user.save(update_fields=['is_active'])
+        
+        # 1. Assigner le rôle pharmacien
         try:
             role_pharmacien = Role.objects.get(name='pharmacien')
             UserRole.objects.get_or_create(user=user, role=role_pharmacien)
         except Role.DoesNotExist:
             pass
-        self._envoyer_email_credentials(user, password_clair)
+
+        # 2. Lié à la pharmacie de l'administrateur créateur
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            from pharmacies.models import Pharmacie
+            # On cherche la pharmacie dont le créateur est propriétaire
+            pharmacie = Pharmacie.objects.filter(proprietaire=request.user).first()
+            if pharmacie:
+                user.pharmacies_travail.add(pharmacie)
+
+        email_envoye = True
+        try:
+            self._envoyer_email_credentials(user, password_clair)
+        except Exception:
+            email_envoye = False
+
+        user.email_envoye = email_envoye
         return user
 
     def _envoyer_email_credentials(self, user, password_clair):
@@ -178,9 +219,20 @@ class PharmacienCreateSerializer(serializers.ModelSerializer):
 
 class AdminCreateSerializer(serializers.ModelSerializer):
     """
-    Crée un compte administrateur (rôle 'administrateur').
+    Crée un compte administrateur (rôle 'gérant').
     Réservé au superadmin.
     """
+    email = serializers.EmailField(
+        validators=[
+            UniqueValidator(
+                queryset=User.objects.all(),
+                message="Un utilisateur avec cette adresse email existe déjà."
+            )
+        ],
+        error_messages={
+            'invalid': "Veuillez saisir une adresse email valide."
+        }
+    )
     class Meta:
         model  = User
         fields = [
@@ -215,11 +267,17 @@ class AdminCreateSerializer(serializers.ModelSerializer):
         user.is_staff  = True
         user.save(update_fields=['is_active', 'is_staff'])
         try:
-            role_admin = Role.objects.get(name='administrateur')
+            role_admin = Role.objects.get(name='gérant')
             UserRole.objects.get_or_create(user=user, role=role_admin)
         except Role.DoesNotExist:
             pass
-        self._envoyer_email_credentials(user, password_clair)
+        email_envoye = True
+        try:
+            self._envoyer_email_credentials(user, password_clair)
+        except Exception:
+            email_envoye = False
+
+        user.email_envoye = email_envoye
         return user
 
     def _envoyer_email_credentials(self, user, password_clair):

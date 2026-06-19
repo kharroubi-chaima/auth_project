@@ -58,16 +58,15 @@ class Command(BaseCommand):
                     )
                     index_A += 1
 
-                # Chaque nuit → pharmacie B de garde
+                # Chaque nuit → TOUTES les pharmacies B de garde
                 if pharmacies_B:
-                    pharmacie_B = pharmacies_B[index_B % len(pharmacies_B)]
-                    GardePharmacie.objects.get_or_create(
-                        pharmacie=pharmacie_B,
-                        date_debut=jour_courant,
-                        date_fin=jour_courant,
-                        defaults={'type_garde': 'nuit'}
-                    )
-                    index_B += 1
+                    for pharmacie_B in pharmacies_B:
+                        GardePharmacie.objects.get_or_create(
+                            pharmacie=pharmacie_B,
+                            date_debut=jour_courant,
+                            date_fin=jour_courant,
+                            defaults={'type_garde': 'nuit'}
+                        )
 
                 jour_courant += timedelta(days=1)
 

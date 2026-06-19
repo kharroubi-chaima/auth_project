@@ -5,7 +5,7 @@ from rest_framework.permissions import BasePermission
 class HasPermission(BasePermission):
     """
     Vérifie si l'utilisateur possède une permission spécifique via ses rôles.
-    Superadmin et administrateur sont toujours exemptés.
+    Administrateur et gérant sont toujours exemptés.
     """
     def __init__(self, perm_codename):
         self.perm_codename = perm_codename
@@ -15,7 +15,7 @@ class HasPermission(BasePermission):
             return False
         if request.user.is_superuser:
             return True
-        if request.user.roles.filter(name__in=['superadmin', 'administrateur']).exists():
+        if request.user.roles.filter(name__in=['administrateur', 'gérant']).exists():
             return True
         return request.user.user_roles.filter(
             role__role_permissions__permission__name=self.perm_codename
@@ -31,30 +31,30 @@ class IsOwnerOrAdmin(BasePermission):
             return False
         if request.user.is_superuser:
             return True
-        if request.user.roles.filter(name__in=['superadmin', 'administrateur']).exists():
+        if request.user.roles.filter(name__in=['administrateur', 'gérant']).exists():
             return True
         return obj == request.user
 
 
 class IsSuperAdmin(BasePermission):
     """
-    Réservé exclusivement au superadmin (superuser Django ou rôle 'superadmin').
+    Réservé exclusivement à l'administrateur (superuser Django ou rôle 'administrateur').
     """
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
         if request.user.is_superuser:
             return True
-        return request.user.roles.filter(name='superadmin').exists()
+        return request.user.roles.filter(name='administrateur').exists()
 
 
 class IsAdminOrSuperAdmin(BasePermission):
     """
-    Autorise les administrateurs et superadmins.
+    Autorise les gérants et administrateurs.
     """
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
         if request.user.is_superuser:
             return True
-        return request.user.roles.filter(name__in=['superadmin', 'administrateur']).exists()
+        return request.user.roles.filter(name__in=['administrateur', 'gérant']).exists()

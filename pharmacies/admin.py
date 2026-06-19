@@ -19,8 +19,17 @@ class HoraireRamadanInline(admin.TabularInline):
 
 class GardeInline(admin.TabularInline):
     model = GardePharmacie
-    extra = 1
+    extra = 0
     fields = ['type_garde', 'date_debut', 'date_fin', 'heure_debut', 'heure_fin']
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Pharmacie)
@@ -73,6 +82,15 @@ class GardeAdmin(admin.ModelAdmin):
     list_filter = ['type_garde']
     search_fields = ['pharmacie__nom']
     ordering = ['date_debut']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(PeriodeRamadan)

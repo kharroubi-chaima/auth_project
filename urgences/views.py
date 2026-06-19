@@ -133,6 +133,37 @@ class RepondreDemandeView(APIView):
         return Response(DemandeUrgenteSerializer(demande).data)
 
 
+class ModifierDemandeView(APIView):
+    """PUT /api/urgences/<id>/modifier/"""
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request, pk):
+        try:
+            demande = DemandeUrgente.objects.get(pk=pk, citoyen=request.user)
+        except DemandeUrgente.DoesNotExist:
+            return Response({'detail': 'Demande introuvable.'}, status=404)
+
+        if demande.statut != 'en_attente':
+            return Response(
+                {'detail': f'Impossible de modifier une demande déjà {demande.statut}.'},
+                status=400
+            )
+
+        ser = DemandeUrgenteCreateSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        demande.type_demande = ser.validated_data['type_demande']
+        demande.titre        = ser.validated_data['titre']
+        demande.description  = ser.validated_data.get('description', '')
+        demande.lat          = ser.validated_data['lat']
+        demande.lng          = ser.validated_data['lng']
+        demande.rayon_km     = ser.validated_data.get('rayon_km', 10)
+        demande.save(update_fields=['type_demande', 'titre', 'description', 'lat', 'lng', 'rayon_km'])
+
+        return Response(DemandeUrgenteSerializer(demande).data)
+
+
 class AnnulerDemandeView(APIView):
     """POST /api/urgences/<id>/annuler/"""
     permission_classes = [IsAuthenticated]

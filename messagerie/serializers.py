@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Conversation, Message, UserPresence, NotificationMessage, Group, GroupMessage
+from .models import Conversation, Message, UserPresence, Group, GroupMessage
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -108,11 +108,15 @@ class GroupSerializer(serializers.ModelSerializer):
     createur_nom = serializers.SerializerMethodField()
     membres_count = serializers.IntegerField(source='membres.count', read_only=True)
     dernier_message = serializers.SerializerMethodField()
+    membres = serializers.SerializerMethodField()
 
     class Meta:
         model = Group
-        fields = ['id', 'nom', 'image', 'createur_id', 'createur_nom', 'membres_count', 'created_at', 'updated_at', 'dernier_message']
+        fields = ['id', 'nom', 'image', 'createur_id', 'createur_nom', 'membres_count', 'created_at', 'updated_at', 'dernier_message', 'membres']
         read_only_fields = ['id', 'created_at', 'updated_at', 'createur_id']
+
+    def get_membres(self, obj):
+        return [{'id': str(m.id), 'nom': f"{m.first_name} {m.last_name}".strip() or m.email} for m in obj.membres.all()]
 
     def get_createur_nom(self, obj):
         return f"{obj.createur.first_name} {obj.createur.last_name}".strip() or obj.createur.email
@@ -134,41 +138,10 @@ class GroupMessageSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = GroupMessage
-        fields = ['id', 'groupe', 'expediteur_id', 'expediteur_nom', 'contenu', 'created_at']
+        fields = ['id', 'groupe', 'expediteur_id', 'expediteur_nom', 'contenu', 'is_system', 'created_at']
         read_only_fields = ['id', 'created_at', 'expediteur_id', 'expediteur_nom']
 
     def get_expediteur_nom(self, obj):
         return f"{obj.expediteur.first_name} {obj.expediteur.last_name}".strip() or obj.expediteur.email
 
 
-class NotificationMessageSerializer(serializers.ModelSerializer):
-    conversation_id  = serializers.IntegerField(source='conversation.id', read_only=True)
-    pharmacie_nom    = serializers.CharField(source='conversation.pharmacie.nom', read_only=True)
-    expediteur_nom   = serializers.SerializerMethodField()
-    contenu          = serializers.CharField(source='message.contenu', read_only=True)
-
-    class Meta:
-        model  = NotificationMessage
-        fields = ['id', 'conversation_id', 'pharmacie_nom', 'expediteur_nom', 'contenu', 'lu', 'created_at']
-
-    def get_expediteur_nom(self, obj):
-        exp = None
-        try:
-            if obj.message:
-                exp = obj.message.expediteur
-            elif obj.message_groupe:
-                exp = obj.message_groupe.expediteur
-        except Exception:
-            pass
-        
-        if exp:
-            return f"{exp.first_name} {exp.last_name}".strip() or exp.email
-        return "TuniServe"
-
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        # S'assurer que contenu est bien extrait si c'est un message de groupe
-        if not data.get('contenu') and instance.message_groupe:
-            data['contenu'] = instance.message_groupe.contenu
-        return data
-    

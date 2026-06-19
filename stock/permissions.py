@@ -16,5 +16,5 @@ class IsAdminRole(BasePermission):
         return (
             user.is_staff or
             user.is_superuser or
-            user.roles.filter(name__in=['administrateur', 'superadmin']).exists()
+            user.roles.filter(name__in=['gérant', 'administrateur']).exists()
         )

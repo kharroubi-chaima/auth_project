@@ -80,26 +80,26 @@ class Command(BaseCommand):
             'view_garde_publique',
             'view_horaire_publique',
         ],
-        # Permissions spécifiques superadmin
-        'superadmin': [
-            'manage_admins',        # créer / supprimer des administrateurs
-            'manage_all_users',     # accès total à tous les comptes
+        # Permissions spécifiques administrateur (ex-superadmin)
+        'administrateur': [
+            'manage_admins',         # créer / supprimer des gérants
+            'manage_all_users',      # accès total à tous les comptes
             'manage_all_pharmacies', # accès total à toutes les pharmacies
-            'suspend_account',      # suspendre n'importe quel compte
+            'suspend_account',       # suspendre n'importe quel compte
         ],
     }
 
     # ─── PERMISSIONS PAR RÔLE ─────────────────────────────────
     ROLE_PERMISSIONS = {
 
-        # ── Superadmin : accès absolu ─────────────────────────
-        # Peut tout faire + gestion des administrateurs
-        'superadmin': '__all__',
+        # ── Administrateur : accès absolu (ex-superadmin) ──────────────────
+        # Peut tout faire + gestion des gérants
+        'administrateur': '__all__',
 
-        # ── Administrateur : accès large (sauf gestion des admins) ─
+        # ── Gérant : accès large (sauf gestion des admins) ─ (ex-admin)
         # Ne peut PAS créer d'autres administrateurs
         # Ne peut PAS supprimer des pharmacies
-        'administrateur': [
+        'gérant': [
             'view_user',
             'add_user',         # créer des pharmaciens
             'change_user',
@@ -246,18 +246,18 @@ class Command(BaseCommand):
             superadmin.set_password(self.SUPERADMIN_PASSWORD)
             superadmin.save()
             self.stdout.write(self.style.SUCCESS(
-                f'\n   ✅ Superadmin créé !\n'
+                f'\n   ✅ Gérant créé !\n'
                 f'      Email    : {self.SUPERADMIN_EMAIL}\n'
                 f'      Password : {self.SUPERADMIN_PASSWORD}\n'
             ))
         else:
             self.stdout.write(self.style.WARNING(
-                f'\n   ⏭️  Superadmin déjà existant ({self.SUPERADMIN_EMAIL})'
+                f'\n   ⏭️  Gérant déjà existant ({self.SUPERADMIN_EMAIL})'
             ))
 
-        role_superadmin = roles.get('superadmin')
+        role_superadmin = roles.get('administrateur')
         _, role_created = UserRole.objects.get_or_create(user=superadmin, role=role_superadmin)
-        flag = '✅ Rôle superadmin assigné' if role_created else '⏭️  Rôle déjà assigné'
+        flag = '✅ Rôle administrateur assigné' if role_created else '⏭️  Rôle déjà assigné'
         self.stdout.write(f'   {flag}')
 
         # ── ÉTAPE 5 : Compte administrateur ───────────────────
@@ -279,18 +279,18 @@ class Command(BaseCommand):
             admin.set_password(self.ADMIN_PASSWORD)
             admin.save()
             self.stdout.write(self.style.SUCCESS(
-                f'\n   ✅ Administrateur créé !\n'
+                f'\n   ✅ Gérant créé !\n'
                 f'      Email    : {self.ADMIN_EMAIL}\n'
                 f'      Password : {self.ADMIN_PASSWORD}\n'
             ))
         else:
             self.stdout.write(self.style.WARNING(
-                f'\n   ⏭️  Administrateur déjà existant ({self.ADMIN_EMAIL})'
+                f'\n   ⏭️  Gérant déjà existant ({self.ADMIN_EMAIL})'
             ))
 
-        role_admin = roles.get('administrateur')
+        role_admin = roles.get('gérant')
         _, role_created = UserRole.objects.get_or_create(user=admin, role=role_admin)
-        flag = '✅ Rôle administrateur assigné' if role_created else '⏭️  Rôle déjà assigné'
+        flag = '✅ Rôle gérant assigné' if role_created else '⏭️  Rôle déjà assigné'
         self.stdout.write(f'   {flag}')
 
         # ── Résumé ────────────────────────────────────────────

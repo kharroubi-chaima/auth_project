@@ -30,6 +30,12 @@ class Categorie(models.Model):
 
 
 class Medicament(models.Model):
+    PROFIL_CHOICES = [
+        ('enfant', 'Enfant'),
+        ('adulte', 'Adulte'),
+        ('tous', 'Tous'),
+    ]
+
     nom                = models.CharField(max_length=200)
     dci                = models.CharField(max_length=200, blank=True, null=True)
     categorie          = models.ForeignKey(
@@ -40,8 +46,12 @@ class Medicament(models.Model):
     date_expiration    = models.DateField(null=True, blank=True)
     ordonnance_requise = models.BooleanField(default=False)
     description        = models.TextField(blank=True, null=True)
+    symptomes_cibles   = models.TextField(blank=True, null=True, help_text="Symptômes spécifiques ciblés par le médicament")
+    voie_administration= models.CharField(max_length=50, blank=True, null=True, help_text="Ex: Orale, Cutanée, Ophtalmique")
+    profil_patient     = models.CharField(max_length=20, choices=PROFIL_CHOICES, default='tous', help_text="Profil ciblé par le médicament")
     quantite_stock     = models.PositiveIntegerField(default=0)
     seuil_alerte       = models.PositiveIntegerField(default=10)
+    vecteur_semantique = models.JSONField(null=True, blank=True)
     created_at         = models.DateTimeField(auto_now_add=True)
     updated_at         = models.DateTimeField(auto_now=True)
 
@@ -65,6 +75,19 @@ class Medicament(models.Model):
     def en_rupture(self) -> bool:
         return self.quantite_stock == 0
 
+    def save(self, *args, **kwargs):
+        # Si on ne met pas spécifiquement à jour le vecteur_semantique,
+        # on le réinitialise pour forcer son recalcul lors de la prochaine recherche.
+        update_fields = kwargs.get('update_fields')
+        if update_fields is None or 'vecteur_semantique' not in update_fields:
+            if update_fields is not None and 'quantite_stock' in update_fields and len(update_fields) == 1:
+                # Ne pas vider le vecteur si on modifie juste le stock
+                pass
+            else:
+                self.vecteur_semantique = None
+                if update_fields is not None and 'vecteur_semantique' not in update_fields:
+                    kwargs['update_fields'] = list(update_fields) + ['vecteur_semantique']
+        super().save(*args, **kwargs)
 
 class StockPharmacie(models.Model):
     pharmacie      = models.ForeignKey(

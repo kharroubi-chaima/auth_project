@@ -42,6 +42,23 @@ def notifier_reservation_annulee(
     return envoyer_notification_ws(citoyen_id, 'reservation_annulee', 'Réservation annulée', message)
 
 
+def notifier_reservation_expiree(
+    citoyen_id: int,
+    medicament_nom: str,
+    pharmacie_nom: str,
+    citoyen_prenom: str = '',
+) -> bool:
+    prenom = f" {citoyen_prenom}" if citoyen_prenom else ''
+    message = (
+        f"Bonjour{prenom},\n"
+        f"Votre réservation a expiré.\n"
+        f"Médicament : {medicament_nom}\n"
+        f"Pharmacie  : {pharmacie_nom}\n"
+        f"Le stock a été libéré."
+    )
+    return envoyer_notification_ws(citoyen_id, 'reservation_expiree', 'Réservation expirée', message)
+
+
 def notifier_reservation_recuperee(
     citoyen_id: int,
     medicament_nom: str,

@@ -28,6 +28,7 @@ from .serializers import (
     ATCSerializer,
 )
 from .permissions import IsAdminRole
+from .prediction_service import StockPredictionService
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +83,16 @@ class MedicamentViewSet(viewsets.ModelViewSet):
         """
         from django.db.models import OuterRef, Subquery, IntegerField
         base_qs = Medicament.objects.select_related("categorie").all()
+        user = self.request.user
 
-        if self._est_admin():
-            pharmacie = get_pharmacie_user(self.request.user)
-            if not pharmacie:
-                return base_qs
-            
-        else: 
-            pharmacie = get_pharmacie_user(self.request.user)
-            if not pharmacie:
-                return base_qs.none()
+        # 1. SuperAdmin (Plateforme) : voit tout le catalogue global
+        if user.is_superuser or user.roles.filter(name="administrateur").exists():
+            return base_qs
+
+        # 2. Admin de pharmacie ou Pharmacien : voit uniquement ce qui est dans SA pharmacie
+        pharmacie = get_pharmacie_user(user)
+        if not pharmacie:
+            return base_qs.none()
 
         stock_qs = StockPharmacie.objects.filter(
             pharmacie=pharmacie,
@@ -117,23 +118,168 @@ class MedicamentViewSet(viewsets.ModelViewSet):
         qs = self.get_queryset().filter(quantite_stock__lte=F("seuil_alerte"))
         return Response(MedicamentSerializer(qs, many=True).data)
 
-    def perform_create(self, serializer):
-        user = self.request.user
-        stock = serializer.validated_data.get("stock")
-        # ✅ CORRIGÉ : utilise le helper
+    @action(detail=False, methods=["post"], url_path="import-csv")
+    def import_csv(self, request):
+        import csv
+        import io
+        from decimal import Decimal
+        from django.db import transaction
+
+        user = request.user
         pharmacie = get_pharmacie_user(user)
 
         if not self._est_admin() and not pharmacie:
             raise PermissionDenied("Aucune pharmacie associée à votre compte.")
 
-        medicament = serializer.save()
+        csv_file = request.FILES.get("file")
+        if not csv_file:
+            return Response({"error": "Veuillez fournir un fichier CSV."}, status=400)
+
+        try:
+            file_data = csv_file.read().decode("utf-8")
+            io_string = io.StringIO(file_data)
+            reader = csv.DictReader(io_string)
+        except Exception as e:
+            return Response({"error": f"Erreur lors de la lecture du fichier : {str(e)}"}, status=400)
+
+        imported_count = 0
+        errors = []
+
+        with transaction.atomic():
+            for row_idx, row in enumerate(reader, start=1):
+                try:
+                    nom = row.get("nom", "").strip()
+                    if not nom:
+                        errors.append(f"Ligne {row_idx} : Le nom du médicament est obligatoire.")
+                        continue
+
+                    dci = row.get("dci", "").strip() or None
+                    atc_nom = row.get("atc", "").strip()
+                    cat_nom = row.get("categorie", "").strip()
+
+                    atc_obj = None
+                    if atc_nom:
+                        atc_obj, _ = ATC.objects.get_or_create(nom=atc_nom)
+
+                    cat_obj = None
+                    if cat_nom:
+                        cat_obj, _ = Categorie.objects.get_or_create(
+                            nom=cat_nom,
+                            defaults={"atc": atc_obj}
+                        )
+
+                    try:
+                        prix_achat = Decimal(row.get("prix_achat", "0") or "0")
+                    except Exception:
+                        prix_achat = Decimal("0")
+
+                    try:
+                        prix_vente = Decimal(row.get("prix_vente", "0") or "0")
+                    except Exception:
+                        prix_vente = Decimal("0")
+
+                    date_exp_str = row.get("date_expiration", "").strip()
+                    date_expiration = None
+                    if date_exp_str:
+                        try:
+                            date_expiration = date.fromisoformat(date_exp_str)
+                        except ValueError:
+                            errors.append(f"Ligne {row_idx} : Format de date d'expiration invalide ({date_exp_str}). Attendu : AAAA-MM-JJ.")
+                            continue
+
+                    ordonnance_requise = row.get("ordonnance_requise", "").strip().lower() in ["true", "1", "yes", "oui"]
+                    description = row.get("description", "").strip() or None
+
+                    try:
+                        quantite_stock = int(row.get("quantite_stock", "0") or "0")
+                    except ValueError:
+                        quantite_stock = 0
+
+                    try:
+                        seuil_alerte = int(row.get("seuil_alerte", "10") or "10")
+                    except ValueError:
+                        seuil_alerte = 10
+
+                    medicament = Medicament.objects.filter(nom__iexact=nom).first()
+                    created = False
+                    if not medicament:
+                        medicament = Medicament.objects.create(
+                            nom=nom,
+                            dci=dci,
+                            categorie=cat_obj,
+                            prix_achat=prix_achat,
+                            prix_vente=prix_vente,
+                            date_expiration=date_expiration,
+                            ordonnance_requise=ordonnance_requise,
+                            description=description,
+                            quantite_stock=quantite_stock,
+                            seuil_alerte=seuil_alerte,
+                        )
+                        created = True
+                    else:
+                        medicament.dci = dci or medicament.dci
+                        medicament.categorie = cat_obj or medicament.categorie
+                        medicament.prix_achat = prix_achat or medicament.prix_achat
+                        medicament.prix_vente = prix_vente or medicament.prix_vente
+                        medicament.date_expiration = date_expiration or medicament.date_expiration
+                        medicament.ordonnance_requise = ordonnance_requise
+                        medicament.description = description or medicament.description
+                        medicament.quantite_stock += quantite_stock
+                        medicament.save()
+
+                    if pharmacie:
+                        stock, stock_created = StockPharmacie.objects.get_or_create(
+                            pharmacie=pharmacie,
+                            medicament=medicament,
+                            defaults={
+                                "quantite_stock": quantite_stock,
+                                "seuil_alerte": seuil_alerte,
+                                "prix_vente": prix_vente,
+                            }
+                        )
+                        if not stock_created:
+                            stock.quantite_stock += quantite_stock
+                            stock.save()
+
+                        # Vérifier le seuil et pousser la notification via WebSocket
+                        from .sms_service import verifier_et_notifier_stock
+                        verifier_et_notifier_stock(stock)
+
+                    imported_count += 1
+
+                except Exception as ex:
+                    errors.append(f"Ligne {row_idx} : Erreur inattendue : {str(ex)}")
+
+            if errors:
+                transaction.set_rollback(True)
+                return Response({"errors": errors}, status=400)
+
+        return Response({
+            "message": f"Importation réussie de {imported_count} médicaments.",
+            "imported_count": imported_count
+        })
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        pharmacie = get_pharmacie_user(user)
+
+        if not self._est_admin() and not pharmacie:
+            raise PermissionDenied("Aucune pharmacie associée à votre compte.")
+
+        quantite_initiale = self.request.data.get("quantite_stock", 0)
+        try:
+            quantite_initiale = int(quantite_initiale)
+        except (ValueError, TypeError):
+            quantite_initiale = 0
+
+        medicament = serializer.save(quantite_stock=quantite_initiale)
 
         if pharmacie:
             stock, created = StockPharmacie.objects.get_or_create(
                 pharmacie=pharmacie,
                 medicament=medicament,
                 defaults={
-                    "quantite_stock": medicament.quantite_stock,
+                    "quantite_stock": quantite_initiale,
                     "seuil_alerte": medicament.seuil_alerte,
                     "prix_vente": medicament.prix_vente,
                 },
@@ -192,16 +338,16 @@ class StockPharmacieViewSet(viewsets.ModelViewSet):
             "pharmacie", "medicament", "medicament__categorie"
         )
         user = self.request.user
-        # superadmin
-        if user.is_superuser or user.roles.filter(name="superadmin").exists():
+        
+        # 1. SuperAdmin (Plateforme) : voit tout
+        if user.is_superuser or user.roles.filter(name="administrateur").exists():
             return base_qs.all()
 
-        if self._est_admin():
-            return base_qs.all()
-
-        pharmacie = get_pharmacie_user(self.request.user)
+        # 2. Admin de pharmacie ou Pharmacien : voit uniquement sa pharmacie
+        pharmacie = get_pharmacie_user(user)
         if pharmacie:
             return base_qs.filter(pharmacie=pharmacie)
+            
         return base_qs.none()
 
     @action(detail=False, methods=["get"], url_path="alertes")
@@ -248,20 +394,42 @@ class StockPharmacieViewSet(viewsets.ModelViewSet):
 
         except Exception as e:
             logger.error(f"Erreur alertes: {e}", exc_info=True)
-            return Response(
-                {
-                    "stock_faible": [],
-                    "expire_bientot": [],
-                    "rupture_stock": [],
-                    "status": {
-                        "total_produits": 0,
-                        "stock_faible": 0,
-                        "expire_bientot": 0,
-                        "rupture_stock": 0,
-                    },
-                    "error": "Une erreur est survenue lors de la récupération des alertes.",
-                }
-            )
+            return Response({"error": str(e)}, status=500)
+
+    @action(detail=True, methods=["get"], url_path="prediction-rupture")
+    def prediction_rupture(self, request, pk=None):
+        """
+        Action pour prédire la date de rupture de stock d'un produit spécifique.
+        """
+        stock = self.get_object()
+        result = StockPredictionService.predict_stockout(stock.medicament_id, stock.pharmacie_id)
+        
+        if "error" in result:
+            return Response({"detail": result["error"]}, status=400)
+            
+        return Response({
+            "stock_id": pk,
+            "estimated_date": result["stockout_date"],
+            "message": f"Rupture prévue aux alentours du {result['stockout_date']}.",
+            "days_until": result["days_until_stockout"]
+        })
+
+    @action(detail=False, methods=["get"], url_path="predictions-globales")
+    def predictions_globales(self, request):
+        """
+        Action pour prédire la date de rupture de stock pour tous les stocks critiques.
+        """
+        user = self.request.user
+        pharmacie = get_pharmacie_user(user)
+        
+        # Si c'est un SuperAdmin sans pharmacie, pharmacie_id = None
+        pharmacie_id = pharmacie.id if pharmacie else None
+        
+        predictions = StockPredictionService.get_critical_predictions(pharmacie_id)
+        
+        return Response({
+            "predictions": predictions
+        })
 
     @action(detail=True, methods=["get"], url_path="historique")
     def historique(self, request, pk=None):
@@ -274,7 +442,7 @@ class StockPharmacieViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], url_path="alertes-globales")
     def alertes_globales(self, request):
         user = request.user
-        if not (user.is_superuser or user.roles.filter(name="superadmin").exists()):
+        if not (user.is_superuser or user.roles.filter(name="administrateur").exists()):
             return Response({"error": "Permission denied"}, status=403)
         from pharmacies.models import Pharmacie
 
@@ -331,7 +499,7 @@ class StockPharmacieViewSet(viewsets.ModelViewSet):
         pharmacie_id = request.query_params.get("pharmacie")
         qs = LigneVente.objects.select_related("medicament", "vente__pharmacie")
 
-        if user.is_superuser or user.roles.filter(name="superadmin").exists():
+        if user.is_superuser or user.roles.filter(name="administrateur").exists():
             if pharmacie_id:
                 qs = qs.filter(vente__pharmacie_id=pharmacie_id)
 
@@ -405,27 +573,23 @@ class VenteViewSet(viewsets.ModelViewSet):
         base_qs = Vente.objects.prefetch_related("lignes__medicament").select_related(
             "pharmacie", "created_by"
         )
+        user = self.request.user
 
-        if self._est_admin():
+        # 1. SuperAdmin : voit tout
+        if user.is_superuser or user.roles.filter(name="administrateur").exists():
             return base_qs.all()
 
-        user = self.request.user
+        # 2. Admin de pharmacie ou Pharmacien : voit uniquement sa pharmacie
         pharmacie = get_pharmacie_user(user)
-        if not pharmacie:
-            return base_qs.none()
-
-        # ✅ Toujours filtrer par pharmacie d'abord
-        qs = base_qs.filter(pharmacie=pharmacie)
-
-        # Propriétaire : peut filtrer par pharmacien
-        if pharmacie.proprietaire == user:
+        if pharmacie:
+            qs = base_qs.filter(pharmacie=pharmacie)
+            # Filtrage par pharmacien optionnel
             pharmacien_id = self.request.query_params.get("pharmacien")
             if pharmacien_id:
                 qs = qs.filter(created_by_id=pharmacien_id)
             return qs
 
-        # ✅ Pharmacien employé : voit toutes les ventes de SA pharmacie
-        return qs  # plus de filter(created_by=user)
+        return base_qs.none()
 
     def get_serializer_context(self):
         context = super().get_serializer_context()

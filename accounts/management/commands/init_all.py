@@ -11,7 +11,7 @@ class Command(BaseCommand):
         ))
 
         etapes = [
-            ('init_admin',        '👤 Permissions, Rôles & Administrateur'),
+            ('init_admin',        '👤 Permissions, Rôles & Gérant'),
             ('init_gouvernorats', '🗺️  Gouvernorats tunisiens'),
             ('init_delegations',  '📍 Délégations tunisiennes'),
             ('init_jours_feries', '📅 Jours fériés'),

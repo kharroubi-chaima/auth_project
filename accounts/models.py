@@ -9,7 +9,6 @@ class UserManager(BaseUserManager):
         if not email:
             raise ValueError("L'email est obligatoire")
         email = self.normalize_email(email)
-        # is_active = True dès l'inscription (plus de blocage TOTP à l'inscription)
         extra_fields.setdefault('is_active', True)
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
@@ -44,7 +43,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         blank=True,
         related_name='pharmaciens',
     )
-    face_encoding = models.JSONField(null=True, blank=True)
 
 
     objects = UserManager()
@@ -89,11 +87,11 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     @property
     def is_superadmin(self):
-        return self.is_superuser or self.has_role('superadmin')
+        return self.is_superuser or self.has_role('administrateur')
 
     @property
     def is_admin(self):
-        return self.has_role('administrateur') or self.is_superadmin
+        return self.has_role('gérant') or self.is_superadmin
 
     @property
     def is_pharmacien(self):

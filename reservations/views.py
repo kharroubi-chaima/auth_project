@@ -11,16 +11,37 @@ import logging
 from stock.models import StockPharmacie
 from .models import Reservation
 from .serializers import ReservationSerializer, ReservationCreateSerializer
+from stock.sms_service import _get_destinataires
 
 logger = logging.getLogger(__name__)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _liberer_expirees():
-    Reservation.objects.filter(
+    now = timezone.now()
+    expirees = Reservation.objects.filter(
         statut='active',
-        expire_at__lte=timezone.now()
-    ).update(statut='expiree')
+        expire_at__lte=now
+    ).select_related('citoyen', 'medicament', 'stock__pharmacie')
+    
+    expirees_list = list(expirees)
+    
+    if expirees_list:
+        from .sms_service import notifier_reservation_expiree
+        for res in expirees_list:
+            try:
+                if res.citoyen:
+                    notifier_reservation_expiree(
+                        citoyen_id=res.citoyen.id,
+                        medicament_nom=res.medicament.nom,
+                        pharmacie_nom=res.stock.pharmacie.nom,
+                        citoyen_prenom=res.citoyen.first_name,
+                    )
+            except Exception as e:
+                logger.error(f"Erreur notification expiration : {e}")
+        
+        expirees_ids = [r.id for r in expirees_list]
+        Reservation.objects.filter(id__in=expirees_ids).update(statut='expiree')
 
 
 def _quantite_reservee(stock) -> int:
@@ -40,7 +61,12 @@ class RecherchePharmacieView(APIView):
     def get(self, request):
         _liberer_expirees()
 
-        nom_med = request.query_params.get('medicament', '').strip()
+        mode     = request.query_params.get('mode', 'auto')
+        nom_med  = request.query_params.get('medicament', '').strip()
+        
+        g_id     = request.query_params.get('gouvernorat')
+        d_id     = request.query_params.get('delegation')
+
         try:
             lat   = float(request.query_params.get('lat',   0))
             lng   = float(request.query_params.get('lng',   0))
@@ -51,33 +77,79 @@ class RecherchePharmacieView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if not nom_med:
-            return Response(
-                {'detail': 'Parametre "medicament" requis.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
         stocks = StockPharmacie.objects.select_related(
-            'pharmacie', 'pharmacie__delegation',
+            'pharmacie', 'pharmacie__delegation', 'pharmacie__delegation__gouvernorat',
             'medicament', 'medicament__categorie'
         ).filter(
             quantite_stock__gt=0,
             pharmacie__est_active=True,
-            medicament__nom__icontains=nom_med,
         )
+
+        # ── FILTRE PAR MODE ───────────────────────────────────────────────────
+        
+        med_scores = {}
+        if mode == 'symptome' and nom_med:
+            try:
+                from stock.semantic_search import SemanticSearchService
+                results = SemanticSearchService.search(nom_med, top_k=8)
+                med_ids = []
+                for res in results:
+                    m_id = res['medicament'].id
+                    med_ids.append(m_id)
+                    med_scores[m_id] = res['score']
+                stocks = stocks.filter(medicament_id__in=med_ids)
+            except Exception as e:
+                logger.error(f"Erreur semantic search: {e}")
+                stocks = stocks.filter(medicament__nom__icontains=nom_med)
+        
+        elif mode == 'region':
+            if d_id:
+                stocks = stocks.filter(pharmacie__delegation_id=d_id)
+            elif g_id:
+                stocks = stocks.filter(pharmacie__delegation__gouvernorat_id=g_id)
+            
+            # Si on cherche par région et qu'on a le nom du med
+            if nom_med:
+                stocks = stocks.filter(medicament__nom__icontains=nom_med)
+
+        else: # mode auto
+            if not nom_med:
+                return Response(
+                    {'detail': 'Parametre "medicament" requis en mode auto.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            stocks = stocks.filter(medicament__nom__icontains=nom_med)
+
+        stocks_list = list(stocks)
+        
+        # Optimisation : recuperer toutes les reservations actives pour ces stocks en une seule requete SQL
+        stock_ids = [s.id for s in stocks_list]
+        res_map = {}
+        if stock_ids:
+            active_res = Reservation.objects.filter(
+                stock_id__in=stock_ids,
+                statut='active',
+                expire_at__gt=timezone.now()
+            ).values('stock_id').annotate(total=Sum('quantite'))
+            res_map = {r['stock_id']: r['total'] for r in active_res}
 
         now       = datetime.now()
         resultats = []
 
-        for stock in stocks:
+        for stock in stocks_list:
             pharmacie = stock.pharmacie
-            dispo     = stock.quantite_stock - _quantite_reservee(stock)
+            dispo     = stock.quantite_stock - res_map.get(stock.id, 0)
             if dispo <= 0:
                 continue
 
-            distance = pharmacie.distance_km(lat, lng)
-            if distance > rayon:
-                continue
+            # En mode symptome, la distance n'est pas pertinente
+            if mode == 'symptome':
+                distance = None
+            else:
+                distance = pharmacie.distance_km(lat, lng)
+                # En mode auto (distance), on filtre par rayon
+                if mode == 'auto' and distance > rayon:
+                    continue
 
             est_ouverte = pharmacie.verifier_ouverture(now.date(), now.time())
 
@@ -93,15 +165,29 @@ class RecherchePharmacieView(APIView):
                 'medicament_id'     : stock.medicament.id,
                 'medicament_nom'    : stock.medicament.nom,
                 'medicament_dci'    : stock.medicament.dci or '',
-                'prix_vente'        : float(stock.prix_vente) if stock.prix_vente and  float (stock.prix_vente) > 0 else float(stock.medicament.prix_vente),
+                'prix_vente'        : float(stock.prix_vente) if stock.prix_vente and float(stock.prix_vente) > 0 else float(stock.medicament.prix_vente),
                 'quantite_stock'    : stock.quantite_stock,
                 'quantite_dispo'    : dispo,
                 'ordonnance_requise': stock.medicament.ordonnance_requise,
-                'distance_km'       : round(distance, 2),
+                'distance_km'       : round(distance, 2) if distance and distance != float('inf') else None,
                 'est_ouverte'       : est_ouverte,
+                'score_pertinence'  : med_scores.get(stock.medicament.id, 0.0),
             })
 
-        resultats.sort(key=lambda r: (not r['est_ouverte'], r['distance_km']))
+        # Tri :
+        # En mode symptome : pertinence (score décroissant) d'abord, puis ouverte.
+        # En modes classiques : ouvertes d'abord, puis distance.
+        if mode == 'symptome':
+            resultats.sort(key=lambda r: (
+                -r.get('score_pertinence', 0.0),
+                not r['est_ouverte'],
+            ))
+        else:
+            resultats.sort(key=lambda r: (
+                not r['est_ouverte'],
+                r['distance_km'] if r['distance_km'] is not None else 999999
+            ))
+        
         return Response(resultats)
 
 
@@ -484,18 +570,28 @@ class HistoriqueReservationsProprietaireView(APIView):
 
     def get(self, request):
         from pharmacies.models import Pharmacie
+        user = request.user
 
-        # Récupérer la pharmacie du propriétaire
-        pharmacie = Pharmacie.objects.filter(proprietaire=request.user).first()
-        if not pharmacie:
-            return Response(
-                {'detail': 'Accès réservé au propriétaire.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        # 1. SuperAdmin : voit tout
+        if user.is_superuser or user.roles.filter(name="administrateur").exists():
+            qs = Reservation.objects.all().select_related('stock__pharmacie', 'medicament', 'citoyen')
+        
+        else:
+            # 2. Admin de pharmacie ou Pharmacien : voit uniquement sa pharmacie
+            # Utilisation d'une logique similaire à get_pharmacie_user
+            pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
+            if not pharmacie:
+                pharmacie = user.pharmacies_travail.first()
 
-        qs = Reservation.objects.filter(
-            stock__pharmacie=pharmacie
-        ).select_related('stock__pharmacie', 'medicament', 'citoyen')
+            if not pharmacie:
+                return Response(
+                    {'detail': 'Accès réservé aux membres d\'une pharmacie.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            qs = Reservation.objects.filter(
+                stock__pharmacie=pharmacie
+            ).select_related('stock__pharmacie', 'medicament', 'citoyen')
 
         # ── Filtre par date ───────────────────────────────────
         date_debut = request.query_params.get('date_debut')

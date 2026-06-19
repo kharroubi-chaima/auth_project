@@ -5,6 +5,7 @@ from .views import (
     HistoriquePharmacienView,
     RepondreDemandeView,
     AnnulerDemandeView,
+    ModifierDemandeView,
 )
 
 urlpatterns = [
@@ -13,4 +14,5 @@ urlpatterns = [
     path('historique/',            HistoriquePharmacienView.as_view()),   # ← nouveau   
     path('<int:pk>/repondre/', RepondreDemandeView.as_view(),  name='urgences-repondre'),
     path('<int:pk>/annuler/',  AnnulerDemandeView.as_view(),   name='urgences-annuler'),
+    path('<int:pk>/modifier/', ModifierDemandeView.as_view(),  name='urgences-modifier'),
 ]

@@ -10,6 +10,8 @@ from stock.models import StockPharmacie, Medicament, Vente, LigneVente
 from reservations.models import Reservation
 from urgences.models import DemandeUrgente
 from pharmacies.models import Pharmacie
+from localisations.models import Delegation
+from django.db.models import F
 
 from .permissions import EstSuperAdmin
 
@@ -82,17 +84,17 @@ class SuperAdminKPIView(APIView):
             last_login__gte=now - timedelta(days=30)
         ).count()
 
-        # ── CA ─────────────────────────────────────
-        ca_jour = (
+        # ── Ventes ─────────────────────────────────────
+        ventes_jour = (
             Vente.objects
             .filter(**vf, created_at__date=today)
-            .aggregate(total=Sum('total'))['total'] or 0
+            .count()
         )
 
-        ca_mois = (
+        ventes_mois = (
             Vente.objects
             .filter(**vf, created_at__date__gte=debut_mois)
-            .aggregate(total=Sum('total'))['total'] or 0
+            .count()
         )
 
         # ── Réservations ───────────────────────────
@@ -151,9 +153,9 @@ class SuperAdminKPIView(APIView):
                 "nouveaux_mois": nouveaux_users,
                 "actifs_30j": actifs_30j,
             },
-            "ca": {
-                "jour": float(ca_jour),
-                "mois": float(ca_mois),
+            "ventes": {
+                "jour": ventes_jour,
+                "mois": ventes_mois,
                 "evolution": 0  # tu peux améliorer après
             },
             "stocks": {
@@ -188,10 +190,10 @@ class SuperAdminPharmaciesKPIView(APIView):
         for p in pharmacies:
             stocks = StockPharmacie.objects.filter(pharmacie=p)
 
-            ca_jour = Vente.objects.filter(
+            ventes_jour = Vente.objects.filter(
                 pharmacie=p,
                 created_at__date=today
-            ).aggregate(total=Sum('total'))['total'] or 0
+            ).count()
 
             ruptures = sum(1 for s in stocks if s.en_rupture)
 
@@ -205,12 +207,12 @@ class SuperAdminPharmaciesKPIView(APIView):
                 'id': p.id,
                 'nom': p.nom,
                 'proprietaire': p.proprietaire.get_full_name() or p.proprietaire.username,
-                'ca_jour': float(ca_jour),
+                'ventes_jour': ventes_jour,
                 'ruptures': ruptures,
                 'reservations_actives': reservations_actives,
             })
 
-        result.sort(key=lambda x: x['ca_jour'], reverse=True)
+        result.sort(key=lambda x: x['ventes_jour'], reverse=True)
 
         return Response({
             "count": len(result),
@@ -240,15 +242,15 @@ class SuperAdminVentesJournalieresView(APIView):
 
         for i in range(period - 1, -1, -1):
             jour = today - timedelta(days=i)
-            ca   = (
+            nb_ventes = (
                 Vente.objects
                 .filter(**vf, created_at__date=jour)
-                .aggregate(total=Sum('total'))['total'] or 0
+                .count()
             )
             result.append({
                 'date':  jour.isoformat(),
                 'label': jour.strftime('%a %d/%m'),
-                'ca':    float(ca),
+                'nb_ventes': nb_ventes,
             })
 
         return Response({'period': period, 'data': result})
@@ -522,8 +524,8 @@ class SuperAdminTopPharmaciesView(APIView):
             Vente.objects
             .filter(pharmacie__est_active=True, created_at__date__gte=debut)
             .values('pharmacie_id', 'pharmacie__nom')
-            .annotate(ca=Sum('total'), nb_ventes=Count('id'))
-            .order_by('-ca')[:5]
+            .annotate(nb_ventes=Count('id'))
+            .order_by('-nb_ventes')[:5]
         )
         return Response({
             'periode_jours': period,
@@ -531,9 +533,161 @@ class SuperAdminTopPharmaciesView(APIView):
                 {
                     'pharmacie_id': row['pharmacie_id'],
                     'pharmacie':    row['pharmacie__nom'],
-                    'ca':           float(row['ca']),
                     'nb_ventes':    row['nb_ventes'],
                 }
                 for row in top
             ],
         })
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Nouveaux Rapports Personnalisés (SuperAdmin)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SuperAdminListeMedicamentsView(APIView):
+    permission_classes = [EstSuperAdmin]
+    def get(self, request):
+        meds = Medicament.objects.all().order_by('nom')
+        data = [{'id': m.id, 'nom': m.nom} for m in meds]
+        return Response({'data': data})
+
+class SuperAdminListePharmaciesView(APIView):
+    permission_classes = [EstSuperAdmin]
+    def get(self, request):
+        pharmacies = Pharmacie.objects.filter(est_active=True).order_by('nom')
+        data = [{'id': p.id, 'nom': p.nom} for p in pharmacies]
+        return Response({'data': data})
+
+class SuperAdminListeDelegationsView(APIView):
+    permission_classes = [EstSuperAdmin]
+    def get(self, request):
+        delegations = Delegation.objects.all().order_by('nom')
+        data = [{'id': d.id, 'nom': d.nom} for d in delegations]
+        return Response({'data': data})
+
+class SuperAdminComparaisonPharmaciesView(APIView):
+    permission_classes = [EstSuperAdmin]
+
+    def get(self, request):
+        pharma1_id = request.query_params.get('pharma1_id')
+        pharma2_id = request.query_params.get('pharma2_id')
+        med_id = request.query_params.get('medicament_id')
+        date_debut_str = request.query_params.get('date_debut')
+        date_fin_str = request.query_params.get('date_fin')
+
+        if not (pharma1_id and pharma2_id and med_id):
+            return Response({'detail': 'Paramètres manquants'}, status=400)
+
+        # Par défaut, les 30 derniers jours
+        fin = date.today()
+        debut = fin - timedelta(days=30)
+
+        if date_debut_str:
+            try:
+                debut = date.fromisoformat(date_debut_str)
+            except ValueError:
+                pass
+        if date_fin_str:
+            try:
+                fin = date.fromisoformat(date_fin_str)
+            except ValueError:
+                pass
+
+        if debut > fin:
+            debut, fin = fin, debut
+
+        # Construire l'historique par jour
+        jours = []
+        courant = debut
+        while courant <= fin:
+            jours.append(courant)
+            courant += timedelta(days=1)
+
+        # Noms
+        pharma1 = Pharmacie.objects.filter(id=pharma1_id).first()
+        pharma2 = Pharmacie.objects.filter(id=pharma2_id).first()
+        med = Medicament.objects.filter(id=med_id).first()
+
+        nom_p1 = pharma1.nom if pharma1 else f"Pharmacie {pharma1_id}"
+        nom_p2 = pharma2.nom if pharma2 else f"Pharmacie {pharma2_id}"
+
+        # Lignes de vente pour Pharma 1
+        qs1 = LigneVente.objects.filter(
+            vente__pharmacie_id=pharma1_id,
+            medicament_id=med_id,
+            vente__created_at__date__gte=debut,
+            vente__created_at__date__lte=fin
+        ).values('vente__created_at__date').annotate(
+            quantite=Sum('quantite')
+        )
+
+        # Lignes de vente pour Pharma 2
+        qs2 = LigneVente.objects.filter(
+            vente__pharmacie_id=pharma2_id,
+            medicament_id=med_id,
+            vente__created_at__date__gte=debut,
+            vente__created_at__date__lte=fin
+        ).values('vente__created_at__date').annotate(
+            quantite=Sum('quantite')
+        )
+
+        dict1 = {row['vente__created_at__date']: float(row['quantite'] or 0) for row in qs1}
+        dict2 = {row['vente__created_at__date']: float(row['quantite'] or 0) for row in qs2}
+
+        data = []
+        for jour in jours:
+            data.append({
+                'date': jour.isoformat(),
+                'label': jour.strftime('%d/%m'),
+                'pharma1_qte': dict1.get(jour, 0),
+                'pharma2_qte': dict2.get(jour, 0),
+            })
+
+        return Response({
+            'pharma1_nom': nom_p1,
+            'pharma2_nom': nom_p2,
+            'medicament_nom': med.nom if med else '',
+            'data': data
+        })
+
+class SuperAdminTopDelegationView(APIView):
+    permission_classes = [EstSuperAdmin]
+
+    def get(self, request):
+        delegation_id = request.query_params.get('delegation_id')
+        date_debut_str = request.query_params.get('date_debut')
+        date_fin_str = request.query_params.get('date_fin')
+
+        if not delegation_id:
+            return Response({'detail': 'Délégation requise'}, status=400)
+
+        qs = LigneVente.objects.filter(
+            vente__pharmacie__delegation_id=delegation_id
+        )
+
+        if date_debut_str:
+            try:
+                debut = date.fromisoformat(date_debut_str)
+                qs = qs.filter(vente__created_at__date__gte=debut)
+            except ValueError:
+                pass
+        if date_fin_str:
+            try:
+                fin = date.fromisoformat(date_fin_str)
+                qs = qs.filter(vente__created_at__date__lte=fin)
+            except ValueError:
+                pass
+
+        top3 = (
+            qs.values('medicament__nom')
+            .annotate(quantite_totale=Sum('quantite'))
+            .order_by('-quantite_totale')[:3]
+        )
+
+        data = []
+        for row in top3:
+            data.append({
+                'medicament': row['medicament__nom'],
+                'quantite': row['quantite_totale'] or 0
+            })
+
+        return Response({'data': data})

@@ -29,141 +29,7 @@ from .serializers import (
 )
 from .permissions import HasPermission, IsOwnerOrAdmin, IsSuperAdmin, IsAdminOrSuperAdmin
 
-# ── Disponibilité des librairies de reconnaissance faciale ───────────────────
-
-# Singleton/Lazy loader pour DeepFace (évite de recharger TF à chaque requête)
-_DEEPFACE_CACHE = None
-
-def get_deepface():
-    global _DEEPFACE_CACHE
-    if _DEEPFACE_CACHE is not None:
-        return _DEEPFACE_CACHE
-    try:
-        from deepface import DeepFace
-        # On force le build du modèle au premier appel pour "payer" la latence une seule fois
-        DeepFace.build_model("VGG-Face")
-        _DEEPFACE_CACHE = DeepFace
-        return _DEEPFACE_CACHE
-    except Exception as e:
-        print(f"Erreur d'importation DeepFace : {e}")
-        return None
-
-try:
-    import cv2
-    import numpy as np
-    CV2_AVAILABLE = True
-except ImportError:
-    CV2_AVAILABLE = False
-
-FACE_REC_AVAILABLE = True # On vérifiera get_deepface() dynamiquement
-
-HAAR_CASCADE_PATH = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml') if CV2_AVAILABLE else None
-
 User = get_user_model()
-
-
-# ── Face Recognition Login ──────────────────────────────────────────────────
-
-class FaceLoginView(APIView):
-    permission_classes     = [AllowAny]
-    authentication_classes = []
-
-    def post(self, request):
-        if not FACE_REC_AVAILABLE:
-            return Response({'error': 'La reconnaissance faciale n\'est pas configurée sur le serveur.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-        email      = request.data.get('email')
-        image_data = request.data.get('image')
-
-        if not image_data:
-            return Response({'error': 'Image requise.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            # Décoder l'image base64
-            if ';base64,' in image_data:
-                _, imgstr = image_data.split(';base64,')
-            else:
-                imgstr = image_data
-            img_bytes = base64.b64decode(imgstr)
-            nparr     = np.frombuffer(img_bytes, np.uint8)
-            img       = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-            if img is None:
-                return Response({'error': 'Image invalide.'}, status=status.HTTP_400_BAD_REQUEST)
-
-            login_user  = None
-            DeepFace = get_deepface()
-
-            if not DeepFace:
-                return Response({'error': 'DeepFace non disponible.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-            # 1. Si un email est fourni, on vérifie uniquement cet utilisateur
-            if email:
-                try:
-                    target_user = User.objects.get(email=email)
-                    if not target_user.face_encoding:
-                        return Response({'error': 'Aucun visage enregistré pour ce compte.'}, status=status.HTTP_400_BAD_REQUEST)
-                    
-                    stored_data = target_user.face_encoding
-                    if isinstance(stored_data, dict) and "opencv_face" in stored_data:
-                        stored_face_bytes = base64.b64decode(stored_data["opencv_face"])
-                        stored_nparr      = np.frombuffer(stored_face_bytes, np.uint8)
-                        stored_img        = cv2.imdecode(stored_nparr, cv2.IMREAD_COLOR)
-
-                        result = DeepFace.verify(img, stored_img, enforce_detection=False, model_name="VGG-Face")
-                        if result['verified'] and result['distance'] < 0.55:
-                            login_user = target_user
-                except User.DoesNotExist:
-                    return Response({'error': 'Utilisateur introuvable.'}, status=status.HTTP_404_NOT_FOUND)
-                except Exception as e:
-                    print(f"DeepFace verify error: {e}")
-
-            # 2. Si pas d'email ou si la vérification ciblée a échoué, on cherche dans TOUTE la base (si e-mail non imposé)
-            if not login_user and not email:
-                users_with_face = User.objects.exclude(face_encoding__isnull=True)
-                for u in users_with_face:
-                    try:
-                        stored_data = u.face_encoding
-                        if isinstance(stored_data, dict) and "opencv_face" in stored_data:
-                            stored_face_bytes = base64.b64decode(stored_data["opencv_face"])
-                            stored_nparr      = np.frombuffer(stored_face_bytes, np.uint8)
-                            stored_img        = cv2.imdecode(stored_nparr, cv2.IMREAD_COLOR)
-
-                            # On utilise un seuil de vérification strict pour éviter les faux positifs
-                            result = DeepFace.verify(img, stored_img, enforce_detection=False, model_name="VGG-Face")
-                            if result['verified']:
-                                login_user = u
-                                break
-                    except Exception as loop_e:
-                        continue
-
-            if login_user:
-                refresh = RefreshToken.for_user(login_user)
-                data    = {
-                    'access' : str(refresh.access_token),
-                    'refresh': str(refresh),
-                    'user'   : {
-                        'id'          : str(login_user.id),
-                        'email'       : login_user.email,
-                        'first_name'  : login_user.first_name,
-                        'last_name'   : login_user.last_name,
-                        'is_staff'    : login_user.is_staff,
-                        'totp_enabled': login_user.totp_enabled,
-                        'status'      : login_user.status,
-                        'roles'       : list(login_user.roles.values_list('name', flat=True)),
-                    }
-                }
-                response = Response(data)
-                response.set_cookie('access_token',  data['access'],  httponly=False, samesite='Lax', secure=False, path='/')
-                response.set_cookie('refresh_token', data['refresh'], httponly=True,  samesite='Lax', secure=False, path='/')
-                return response
-            else:
-                return Response({'error': 'Visage non reconnu.'}, status=status.HTTP_401_UNAUTHORIZED)
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return Response({'error': f'Erreur: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
 
 # ── JWT custom ────────────────────────────────────────────────────────────────
@@ -301,8 +167,19 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = PharmacienCreateSerializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
+            email_envoye = getattr(user, 'email_envoye', True)
+            if email_envoye:
+                msg = "Compte pharmacien créé avec succès."
+                warning = False
+            else:
+                msg = "Le compte pharmacien a été créé avec succès, mais l'e-mail de connexion n'a pas pu être envoyé (serveur de messagerie indisponible)."
+                warning = True
             return Response(
-                {'status': 'Compte pharmacien créé.', 'email': user.email},
+                {
+                    'status': msg,
+                    'email': user.email,
+                    'warning': warning
+                },
                 status=status.HTTP_201_CREATED
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -337,17 +214,53 @@ class UserViewSet(viewsets.ModelViewSet):
         return Response(RoleSerializer(user.roles.all(), many=True).data)
 
     # ── Suspension / activation (admin/superadmin) ────────────────────────────
+    
+    def _verifier_droit_gestion(self, request, target_user):
+        """
+        Vérifie si le demandeur (request.user) a le droit de suspendre/activer target_user.
+        """
+        requester = request.user
+        
+        # 1. Administrateur : Toujours OK
+        if requester.is_superuser or requester.roles.filter(name='administrateur').exists():
+            return True
+            
+        # 2. Gérant Pharmacie : OK uniquement pour ses pharmaciens
+        if requester.roles.filter(name='gérant').exists():
+            from pharmacies.models import Pharmacie
+            # On récupère la pharmacie dont il est propriétaire
+            pharmacie = Pharmacie.objects.filter(proprietaire=requester).first()
+            if not pharmacie:
+                return False
+            
+            # On vérifie si target_user est dans la liste des pharmaciens de CETTE pharmacie
+            return pharmacie.pharmaciens.filter(pk=target_user.pk).exists()
+                
+        return False
 
     @action(detail=True, methods=['post'])
     def suspend(self, request, pk=None):
-        user        = self.get_object()
+        user = self.get_object()
+        if not self._verifier_droit_gestion(request, user):
+            return Response(
+                {'error': 'Vous n\'avez pas la permission de suspendre cet utilisateur.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+            
         user.status = 'suspended'
-        user.save(update_fields=['status'])
+        user.is_active = False
+        user.save(update_fields=['status', 'is_active'])
         return Response({'status': f'Compte {user.email} suspendu.'})
 
     @action(detail=True, methods=['post'])
     def activate(self, request, pk=None):
-        user           = self.get_object()
+        user = self.get_object()
+        if not self._verifier_droit_gestion(request, user):
+            return Response(
+                {'error': 'Vous n\'avez pas la permission d\'activer cet utilisateur.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+            
         user.status    = 'active'
         user.is_active = True
         user.save(update_fields=['status', 'is_active'])
@@ -394,57 +307,6 @@ class UserViewSet(viewsets.ModelViewSet):
         user.save(update_fields=['totp_enabled', 'totp_secret'])
         return Response({'status': 'TOTP désactivé.'})
 
-    # ── Enregistrement du visage ──────────────────────────────────────────────
-
-    @action(detail=False, methods=['post'], url_path='face-enroll')
-    def face_enroll(self, request):
-        if not FACE_REC_AVAILABLE:
-            return Response({'error': 'La reconnaissance faciale n\'est pas configurée sur le serveur.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-        image_data = request.data.get('image')
-        if not image_data:
-            return Response({'error': 'Image requise.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            _, imgstr = image_data.split(';base64,')
-            img_bytes = base64.b64decode(imgstr)
-            nparr     = np.frombuffer(img_bytes, np.uint8)
-            img       = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-            user = request.user
-            DeepFace = get_deepface()
-            
-            if not DeepFace:
-                 return Response({'error': 'DeepFace non disponible.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-            try:
-                # On utilise DeepFace pour extraire et normaliser le visage
-                faces = DeepFace.extract_faces(img, enforce_detection=True)
-                if faces:
-                    # DeepFace retourne des visages normalisés [0, 1] en RGB
-                    face_img = faces[0]['face']
-                    face_img = (face_img * 255).astype(np.uint8)
-                    face_img = cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR)
-
-                    _, buffer    = cv2.imencode('.jpg', face_img)
-                    face_base64  = base64.b64encode(buffer).decode('utf-8')
-
-                    user.face_encoding = {
-                        "type"       : "deepface",
-                        "opencv_face": face_base64
-                    }
-                else:
-                    return Response({'error': 'Aucun visage détecté.'}, status=status.HTTP_400_BAD_REQUEST)
-            except Exception as e:
-                return Response({'error': f'Erreur détection: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
-
-
-            user.save(update_fields=['face_encoding'])
-            return Response({'status': 'Visage enregistré avec succès.'})
-
-        except Exception as e:
-            return Response({'error': f'Erreur: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
-
 
 # ── SuperAdmin — gestion des administrateurs ──────────────────────────────────
 
@@ -473,7 +335,8 @@ class SuperAdminUserViewSet(viewsets.ModelViewSet):
             qs = qs.filter(
                 Q(email__icontains=search) |
                 Q(first_name__icontains=search) |
-                Q(last_name__icontains=search)
+                Q(last_name__icontains=search) |
+                Q(telephone__icontains=search)
             )
         return qs
 
@@ -491,8 +354,19 @@ class SuperAdminUserViewSet(viewsets.ModelViewSet):
         serializer = AdminCreateSerializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
+            email_envoye = getattr(user, 'email_envoye', True)
+            if email_envoye:
+                msg = "Compte administrateur créé avec succès."
+                warning = False
+            else:
+                msg = "Le compte administrateur a été créé avec succès, mais l'e-mail d'invitation n'a pas pu être envoyé (serveur de messagerie indisponible)."
+                warning = True
             return Response(
-                {'status': 'Compte administrateur créé.', 'email': user.email},
+                {
+                    'status': msg,
+                    'email': user.email,
+                    'warning': warning
+                },
                 status=status.HTTP_201_CREATED
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -504,8 +378,19 @@ class SuperAdminUserViewSet(viewsets.ModelViewSet):
         serializer = PharmacienCreateSerializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
+            email_envoye = getattr(user, 'email_envoye', True)
+            if email_envoye:
+                msg = "Compte pharmacien créé avec succès."
+                warning = False
+            else:
+                msg = "Le compte pharmacien a été créé avec succès, mais l'e-mail de connexion n'a pas pu être envoyé (serveur de messagerie indisponible)."
+                warning = True
             return Response(
-                {'status': 'Compte pharmacien créé.', 'email': user.email},
+                {
+                    'status': msg,
+                    'email': user.email,
+                    'warning': warning
+                },
                 status=status.HTTP_201_CREATED
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

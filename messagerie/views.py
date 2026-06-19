@@ -6,12 +6,11 @@ from django.shortcuts import get_object_or_404
 from django.db import models
 from django.contrib.auth import get_user_model
 
-from .models import Conversation, Message, UserPresence, NotificationMessage, Group, GroupMessage
+from .models import Conversation, Message, UserPresence, Group, GroupMessage
 from .serializers import (
     ConversationSerializer,
     MessageSerializer,
     PresenceSerializer,
-    NotificationMessageSerializer,
     GroupSerializer,
     GroupMessageSerializer,
 )
@@ -30,7 +29,7 @@ class ConversationListCreateView(APIView):
                 .select_related("pharmacie", "pharmacie__proprietaire")
                 .prefetch_related("messages")
             )
-        elif user.roles.filter(name="administrateur").exists() or user.is_staff:
+        elif user.roles.filter(name="gérant").exists() or user.is_staff:
             # L'admin voit toutes les conversations ou celles où il est impliqué
             # Ici on suppose que l'admin peut parler à n'importe quel pharmacien
             qs = (
@@ -39,14 +38,13 @@ class ConversationListCreateView(APIView):
                 .prefetch_related("messages")
             )
         else:
-            # Pharmacien voit les conversations de sa pharmacie
-            pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
-            if not pharmacie:
-                pharmacie = user.pharmacies_travail.first()
-            if not pharmacie:
-                return Response([])
+            # Pharmacien voit les conversations de toutes ses pharmacies (propriétaire ou employé)
+            from django.db.models import Q
             qs = (
-                Conversation.objects.filter(pharmacie=pharmacie)
+                Conversation.objects.filter(
+                    Q(pharmacie__proprietaire=user) | Q(pharmacie__pharmaciens=user)
+                )
+                .distinct()
                 .select_related("pharmacie", "pharmacie__proprietaire", "citoyen")
                 .prefetch_related("messages")
             )
@@ -93,14 +91,12 @@ class MessageListView(APIView):
         conv = get_object_or_404(Conversation, id=conversation_id)
         user = request.user
 
-        # Vérifier accès
-        pharmacie = Pharmacie.objects.filter(proprietaire=user).first()
-        if not pharmacie:
-            pharmacie = user.pharmacies_travail.first()
-
-        is_pharmacien = pharmacie and conv.pharmacie == pharmacie
+        is_pharmacien = (
+            conv.pharmacie.proprietaire == user or
+            conv.pharmacie.pharmaciens.filter(id=user.id).exists()
+        )
         is_citoyen = conv.citoyen == user
-        is_admin = user.is_staff or user.roles.filter(name="administrateur").exists()
+        is_admin = user.is_staff or user.roles.filter(name="gérant").exists()
 
         if not is_pharmacien and not is_citoyen and not is_admin:
             return Response({"detail": "Accès refusé."}, status=403)
@@ -136,7 +132,7 @@ class MessageListView(APIView):
             # Notifier le propriétaire ET les employés
             destinataires.append(conv.pharmacie.proprietaire)
             destinataires += list(conv.pharmacie.pharmaciens.all())
-        elif request.user.is_staff or request.user.has_role('administrateur'):
+        elif request.user.is_staff or request.user.has_role('gérant'):
             # Si l'admin parle, on notifie soit le citoyen soit le pharmacien
             # On peut aussi notifier les deux ou laisser la logique actuelle
             if conv.citoyen != request.user:
@@ -149,13 +145,6 @@ class MessageListView(APIView):
 
         # Nettoyer les doublons et les None
         destinataires = list(set([d for d in destinataires if d and d != request.user]))
-
-        for d in destinataires:
-            NotificationMessage.objects.create(
-                destinataire=d,
-                conversation=conv,
-                message=message,
-            )
 
         from django.utils import timezone
         conv.updated_at = timezone.now()
@@ -237,7 +226,7 @@ class GroupListCreateView(APIView):
 
     def post(self, request):
         # Seul un admin ou superadmin peut créer un groupe (selon la demande)
-        if not (request.user.is_staff or request.user.has_role('administrateur')):
+        if not (request.user.is_staff or request.user.has_role('gérant')):
             return Response({"detail": "Seuls les administrateurs peuvent créer des groupes."}, status=403)
         
         nom = request.data.get("nom")
@@ -264,7 +253,7 @@ class GroupMessageListView(APIView):
 
     def get(self, request, group_id):
         group = get_object_or_404(Group, id=group_id)
-        if not group.membres.filter(id=request.user.id).exists():
+        if group.createur != request.user and not group.membres.filter(id=request.user.id).exists():
             return Response({"detail": "Accès refusé."}, status=403)
         
         messages = group.messages.select_related("expediteur").all()
@@ -272,7 +261,7 @@ class GroupMessageListView(APIView):
 
     def post(self, request, group_id):
         group = get_object_or_404(Group, id=group_id)
-        if not group.membres.filter(id=request.user.id).exists():
+        if group.createur != request.user and not group.membres.filter(id=request.user.id).exists():
             return Response({"detail": "Accès refusé."}, status=403)
         
         contenu = request.data.get("contenu", "").strip()
@@ -295,7 +284,7 @@ class GroupMessageListView(APIView):
             
             # 1. Diffuser dans le groupe de discussion
             async_to_sync(channel_layer.group_send)(
-                f'chat_group_{group_id}',
+                f'group_chat_{group_id}',
                 {
                     'type': 'group_message',
                     'message': GroupMessageSerializer(message).data
@@ -308,12 +297,6 @@ class GroupMessageListView(APIView):
                 if membre.id == request.user.id:
                     continue
                 
-                # Persistance
-                NotificationMessage.objects.create(
-                    destinataire=membre,
-                    groupe=group,
-                    message_groupe=message
-                )
 
                 async_to_sync(channel_layer.group_send)(
                     f'notif_user_{membre.id}',
@@ -333,31 +316,196 @@ class GroupMessageListView(APIView):
         
         return Response(GroupMessageSerializer(message).data, status=201)
 
+
+class GroupMessageDetailView(APIView):
+    """Permet d'éditer ou supprimer un message de groupe."""
+    permission_classes = [IsAuthenticated]
+
+    EDIT_WINDOW_MINUTES = 15
+
+    def patch(self, request, message_id):
+        message = get_object_or_404(GroupMessage, id=message_id)
+
+        # Seul l'expéditeur du message peut le modifier
+        if message.expediteur != request.user:
+            return Response({"detail": "Non autorisé."}, status=403)
+
+        # Vérifier la fenêtre de modification (15 minutes)
+        from django.utils import timezone
+        from datetime import timedelta
+        delai = timezone.now() - message.created_at
+        if delai > timedelta(minutes=self.EDIT_WINDOW_MINUTES):
+            minutes_restantes = 0
+            return Response(
+                {"detail": f"Impossible de modifier un message après {self.EDIT_WINDOW_MINUTES} minutes."},
+                status=403
+            )
+
+        contenu = request.data.get("contenu", "").strip()
+        if not contenu:
+            return Response({"detail": "Le contenu ne peut pas être vide."}, status=400)
+
+        message.contenu = contenu
+        message.save(update_fields=["contenu"])
+
+        # NOTIFICATION TEMPS RÉEL (WebSocket) de la modification
+        try:
+            from channels.layers import get_channel_layer
+            from asgiref.sync import async_to_sync
+            channel_layer = get_channel_layer()
+            
+            async_to_sync(channel_layer.group_send)(
+                f'group_chat_{message.groupe.id}',
+                {
+                    'type': 'group_message',
+                    'message': GroupMessageSerializer(message).data
+                }
+            )
+        except Exception as e:
+            print(f"Erreur notification modification groupe: {e}")
+
+        return Response(GroupMessageSerializer(message).data)
+
+    def delete(self, request, message_id):
+        message = get_object_or_404(GroupMessage, id=message_id)
+
+        # Seul l'expéditeur ou un admin peut supprimer
+        is_admin = request.user.is_staff or request.user.roles.filter(name="gérant").exists()
+        if message.expediteur != request.user and not is_admin:
+            return Response({"detail": "Non autorisé."}, status=403)
+
+        message.delete()
+        return Response(status=204)
+
+
+class MessageDetailView(APIView):
+    """Permet d'éditer ou supprimer un message individuel."""
+    permission_classes = [IsAuthenticated]
+
+    EDIT_WINDOW_MINUTES = 15
+
+    def patch(self, request, message_id):
+        message = get_object_or_404(Message, id=message_id)
+
+        # Seul l'expéditeur du message peut le modifier
+        if message.expediteur != request.user:
+            return Response({"detail": "Non autorisé."}, status=403)
+
+        # Vérifier la fenêtre de modification (15 minutes)
+        from django.utils import timezone
+        from datetime import timedelta
+        delai = timezone.now() - message.created_at
+        if delai > timedelta(minutes=self.EDIT_WINDOW_MINUTES):
+            return Response(
+                {"detail": f"Impossible de modifier un message après {self.EDIT_WINDOW_MINUTES} minutes."},
+                status=403
+            )
+
+        contenu = request.data.get("contenu", "").strip()
+        if not contenu:
+            return Response({"detail": "Le contenu ne peut pas être vide."}, status=400)
+
+        message.contenu = contenu
+        message.save(update_fields=["contenu"])
+
+        # NOTIFICATION TEMPS RÉEL (WebSocket) de la modification
+        try:
+            from channels.layers import get_channel_layer
+            from asgiref.sync import async_to_sync
+            channel_layer = get_channel_layer()
+            
+            async_to_sync(channel_layer.group_send)(
+                f'chat_{message.conversation.id}',
+                {
+                    'type': 'chat_message',
+                    'message': MessageSerializer(message).data
+                }
+            )
+        except Exception as e:
+            print(f"Erreur notification modification message: {e}")
+
+        return Response(MessageSerializer(message).data)
+
+    def delete(self, request, message_id):
+        message = get_object_or_404(Message, id=message_id)
+
+        # Seul l'expéditeur ou un admin peut supprimer
+        is_admin = request.user.is_staff or request.user.roles.filter(name="gérant").exists()
+        if message.expediteur != request.user and not is_admin:
+            return Response({"detail": "Non autorisé."}, status=403)
+
+        message.delete()
+        return Response(status=204)
+
 class NotificationsMarquerToutesLuesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        NotificationMessage.objects.filter(
-            destinataire=request.user, lu=False
-        ).update(lu=True)
+        user = request.user
+        from django.db.models import Q
+        if user.roles.filter(name="citoyen").exists():
+            conversations = Conversation.objects.filter(citoyen=user)
+        elif user.roles.filter(name="gérant").exists() or user.is_staff:
+            conversations = Conversation.objects.all()
+        else:
+            conversations = Conversation.objects.filter(
+                Q(pharmacie__proprietaire=user) | Q(pharmacie__pharmaciens=user)
+            ).distinct()
+
+        Message.objects.filter(
+            conversation__in=conversations,
+            lu=False
+        ).exclude(expediteur=user).update(lu=True)
         return Response({"detail": "Toutes marquées comme lues."})
-    
-    
+
+
 class NotificationsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = NotificationMessage.objects.filter(
-            destinataire=request.user, lu=False
-        ).select_related("conversation__pharmacie", "message__expediteur")
-        return Response(NotificationMessageSerializer(qs, many=True).data)
+        user = request.user
+        from django.db.models import Q
+        if user.roles.filter(name="citoyen").exists():
+            conversations = Conversation.objects.filter(citoyen=user)
+        elif user.roles.filter(name="gérant").exists() or user.is_staff:
+            conversations = Conversation.objects.all()
+        else:
+            conversations = Conversation.objects.filter(
+                Q(pharmacie__proprietaire=user) | Q(pharmacie__pharmaciens=user)
+            ).distinct()
+
+        recent_messages = Message.objects.filter(
+            conversation__in=conversations
+        ).exclude(expediteur=user).select_related("conversation__pharmacie", "expediteur").order_by('-created_at')[:15]
+
+        data = []
+        for msg in recent_messages:
+            data.append({
+                'id': msg.id,
+                'conversation_id': msg.conversation.id,
+                'pharmacie_nom': msg.conversation.pharmacie.nom,
+                'expediteur_nom': f"{msg.expediteur.first_name} {msg.expediteur.last_name}".strip() or msg.expediteur.email,
+                'contenu': msg.contenu,
+                'lu': msg.lu,
+                'created_at': msg.created_at.isoformat()
+            })
+        return Response(data)
 
     def patch(self, request, notif_id):
-        notif = get_object_or_404(
-            NotificationMessage, id=notif_id, destinataire=request.user
+        message = get_object_or_404(Message, id=notif_id)
+        user = request.user
+        conv = message.conversation
+        is_part = (
+            conv.citoyen == user or
+            conv.pharmacie.proprietaire == user or
+            conv.pharmacie.pharmaciens.filter(id=user.id).exists() or
+            user.is_staff or user.roles.filter(name="gérant").exists()
         )
-        notif.lu = True
-        notif.save(update_fields=["lu"])
+        if not is_part:
+            return Response({"detail": "Accès refusé."}, status=403)
+
+        message.lu = True
+        message.save(update_fields=["lu"])
         return Response({"detail": "Marquée comme lue."})
 
 
@@ -419,3 +567,88 @@ class PharmaciesDisponiblesView(APIView):
                 }
             )
         return Response(data)
+
+class GroupDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, group_id):
+        group = get_object_or_404(Group, id=group_id)
+        if group.createur != request.user:
+            return Response({"detail": "Seul le créateur peut renommer le groupe."}, status=403)
+        
+        nom = request.data.get("nom")
+        if not nom:
+            return Response({"detail": "Le nom du groupe est requis."}, status=400)
+            
+        group.nom = nom
+        group.save(update_fields=["nom"])
+        return Response(GroupSerializer(group).data)
+
+    def delete(self, request, group_id):
+        group = get_object_or_404(Group, id=group_id)
+        if group.createur != request.user:
+            return Response({"detail": "Seul le créateur peut supprimer le groupe."}, status=403)
+            
+        group.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class GroupMemberView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, group_id):
+        group = get_object_or_404(Group, id=group_id)
+        if group.createur != request.user:
+            return Response({"detail": "Seul le créateur peut ajouter des membres."}, status=403)
+            
+        membre_id = request.data.get("membre_id")
+        if not membre_id:
+            return Response({"detail": "L'ID du membre est requis."}, status=400)
+            
+        User = get_user_model()
+        membre = get_object_or_404(User, id=membre_id)
+        
+        group.membres.add(membre)
+        
+        return Response(GroupSerializer(group).data)
+
+
+class GroupMemberDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, group_id, membre_id):
+        group = get_object_or_404(Group, id=group_id)
+        
+        # Un membre peut se retirer lui-même, ou le créateur peut le retirer
+        if str(request.user.id) != membre_id and group.createur != request.user:
+            return Response({"detail": "Non autorisé."}, status=403)
+            
+        # Le créateur ne peut pas être retiré
+        if str(group.createur.id) == membre_id:
+            return Response({"detail": "Le créateur ne peut pas être retiré du groupe."}, status=400)
+            
+        User = get_user_model()
+        membre = get_object_or_404(User, id=membre_id)
+        
+        group.membres.remove(membre)
+        
+        return Response({"detail": "Membre retiré avec succès."})
+
+
+class PharmacienListView(APIView):
+    """Retourne la liste de tous les pharmaciens pour l'ajout dans un groupe."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        User = get_user_model()
+        pharmaciens = User.objects.filter(roles__name='pharmacien').values('id', 'nom', 'prenom', 'email')
+        data = [
+            {
+                'id': str(p['id']),
+                'nom': f"{p.get('prenom', '')} {p.get('nom', '')}".strip() or p['email'],
+                'email': p['email'],
+            }
+            for p in pharmaciens
+        ]
+        return Response(data)
+
